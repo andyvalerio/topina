@@ -1,0 +1,16 @@
+{
+  "name": "topina",
+  "version": "0.0.1",
+  "description": "Live distress monitoring for a cat's outdoor walks",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "probe": "node --env-file=.env probe.js",
+    "test": "npm run test:e2e",
+    "test:e2e": "node --env-file-if-exists=.env --test \"tests/e2e/*.test.js\"",
+    "position": "node --env-file=.env position.js"
+  },
+  "dependencies": {
+    "tractive": "github:FAXES/tractive"
+  }
+}
