@@ -177,6 +177,30 @@ a `started_at` (**C19**), so we can tell a command landed rather than hoping.
 Still unanswered: **the real fix interval in live mode** (Q1). That needs her
 outdoors.
 
+### What movement actually looks like
+
+A guided walk (`npm run record -- --phases`) with the tracker held in hand,
+prompts delivered to a phone, each fix tagged with the pace being walked:
+
+| pace | median m/s | max m/s |
+|---|---|---|
+| standing still | 0.15 | **0.23** |
+| walking slowly | 0.69 | 0.78 |
+| walking normally | 1.00 | 1.27 |
+| jogging / bursts | 1.52 | 1.58 |
+
+Monotonic and cleanly separated — **4.2x** between standing still and walking.
+Derived speed is the usable signal; the tracker's own `speed` field is
+intermittent (absent when still) and wrong when present (0.1 m/s reported
+while actually doing 1.52).
+
+**The important finding is the lag.** Reported position trails real motion by
+about **8 seconds**, two fixes. Speed does not rise until two fixes after
+walking begins, and the two fastest readings of the entire recording arrive two
+fixes *after* the running stopped. The device is smoothing. That sets a floor on
+how immediate any alert can be, and it means analysis must discard fixes near a
+phase boundary or sprint speeds land in the "standing still" bucket (**C22**).
+
 ### The noise floor test (step 4) — done, and it passed
 
 The one thing that could have killed the premise. Measured with the tracker

@@ -99,9 +99,20 @@ traces: speed, thrash, staleness, battery, accuracy, sensor type.
 
 **F12** · provisional — Detectors that classify the live signal stream into
 states (calm / elevated / alarm). Thresholds derive from observed data, not
-guesses. **Unblocked:** the measured noise floor (**Q2**) gives a real floor to
-clear — 0.7m of apparent movement and 0.28 m/s of speed noise. Real incident
-observations are still needed to set the upper bounds.
+guesses. **Unblocked, with measured reference points** from a guided walk
+(lag-corrected, tracker held in hand, light rain):
+
+| pace | median m/s | max m/s |
+|---|---|---|
+| standing still | 0.15 | **0.23** |
+| walking slowly | 0.69 | 0.78 |
+| walking normally | 1.00 | 1.27 |
+| jogging / bursts | 1.52 | 1.58 |
+
+Still never exceeds 0.23 m/s; walking runs 0.95 m/s median — **4.2x
+separation**. A "moving" threshold around 0.4 m/s separates cleanly. A cat
+sprint is 3-8 m/s, far above anything measured here, so a sprint detector has
+ample headroom. Real incident data is still needed for the upper bounds.
 
 **F13** · open — Detector tuning is expected to be iterative and ongoing. The
 system must make it cheap to change a threshold and re-evaluate it against the
@@ -206,6 +217,19 @@ viable. `auth.js` caches the token to `.token.json` (gitignored, mode 600) and
 reuses it until an hour before expiry; a renewal refused while the current
 token is still valid falls back to the current token.
 
+**C22** — **Reported position lags real motion by about 8 seconds** (two fixes).
+Measured on a guided walk: speed does not rise until two fixes after walking
+starts, and the two fastest readings of the whole recording land two fixes
+*after* the running stopped. The device appears to smooth positions. Every
+consequence follows from this: detection is ~8s behind reality, alerts will
+clear ~8s late, and any analysis that trusts a label at a phase boundary will
+put sprint speeds in the "standing still" bucket. **This is the floor on how
+"immediate" notification can ever be.**
+
+**C23** — Movement recordings must not be analysed as noise. Spread from a
+centroid measures how far someone walked, not GPS error. `analyse.js` reports
+the noise-floor interpretation only for stationary recordings.
+
 **C21** — A lockout affects *only* the auth endpoint. Existing tokens keep
 working, and a token obtained elsewhere — from the Tractive web app's
 `Authorization` header — works immediately. `npm run token -- <token>` verifies
@@ -282,10 +306,12 @@ Answered by running the early steps:
 from centroid median 0.52m, p95 0.75m, max 1.11m. Apparent movement per fix p95
 0.58m. **F12 is unblocked.**
 
-**Q3** — ~~Does the `speed` field arrive populated?~~ **Answered, and it
-depends on the source.** The REST `device_pos_report` carries `speed` as a
-number; **live-mode channel fixes carry no `speed` field at all** (39 of 39
-undefined). Deriving speed ourselves is therefore mandatory, not optional.
+**Q3** — ~~Does the `speed` field arrive populated?~~ **Answered, corrected.**
+An earlier reading of "never present in live mode" was an artefact of a
+stationary recording: `speed` appears **only when the tracker is moving** and is
+absent when it is still. When present it is **unreliable** — 0.1 m/s reported
+while the tracker was demonstrably doing 1.52 m/s. Deriving speed ourselves is
+mandatory, now for a better reason: the field is both intermittent and wrong.
 
 **Q4** — ~~Does accuracy vary enough to be worth gating detectors on?~~
 **Answered: no, not in live mode.** Once the fix settles, `accuracy` is `0` for

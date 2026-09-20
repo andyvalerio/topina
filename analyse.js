@@ -24,13 +24,13 @@ const fixes = [];
 let lastFixTime = null;
 
 for (const line of lines) {
-    const { event } = JSON.parse(line);
+    const { event, phase } = JSON.parse(line);
     counts.set(event.message, (counts.get(event.message) ?? 0) + 1);
 
     const position = event.position;
     if (!position?.latlong || position.time === lastFixTime) continue;
     lastFixTime = position.time;
-    fixes.push(position);
+    fixes.push({ ...position, phase });
 }
 
 console.log(`${file}\n${lines.length} events, ${fixes.length} unique fixes\n`);
@@ -94,13 +94,81 @@ for (const fix of settled) sensors.set(fix.sensor_used, (sensors.get(fix.sensor_
 console.log('\n--- sensor used ---');
 for (const [sensor, count] of sensors) console.log(`  ${String(count).padStart(5)}  ${sensor}`);
 
+// The tracker's reported position lags real motion by about two fixes, so
+// the fixes just after a phase change still describe the *previous* pace.
+// Including them puts sprint speeds in the "standing still" bucket.
+const PHASE_LAG_S = 8;
+
+/**
+ * Fixes whose phase label can be trusted: far enough past a phase change that
+ * the reported position has caught up with what the person was actually doing.
+ * @param {object[]} all
+ * @returns {object[]}
+ */
+function lagCorrected(all) {
+    const phaseStart = new Map();
+    for (const fix of all) {
+        if (fix.phase && !phaseStart.has(fix.phase)) phaseStart.set(fix.phase, fix.time);
+    }
+    return all.filter((fix) => fix.phase && fix.time - phaseStart.get(fix.phase) >= PHASE_LAG_S);
+}
+
+// A guided recording labels each fix with the pace being walked, which is
+// the only way to know what a number like 1.2 m/s actually corresponds to.
+const guided = settled.some((fix) => fix.phase);
+if (guided) {
+    console.log('\n--- derived speed by phase ---');
+    console.log('  phase                 fixes     median       p95        max');
+
+    const trusted = new Set(lagCorrected(settled).map((fix) => fix.time));
+    const byPhase = new Map();
+    for (const [i, fix] of settled.slice(1).entries()) {
+        if (!fix.phase || intervals[i] <= 0 || !trusted.has(fix.time)) continue;
+        const speed = steps[i] / intervals[i];
+        byPhase.set(fix.phase, [...(byPhase.get(fix.phase) ?? []), speed]);
+    }
+    console.log(`  (fixes within ${PHASE_LAG_S}s of a phase change excluded — reporting lag)`);
+
+    for (const [phase, speeds] of byPhase) {
+        console.log(
+            `  ${phase.padEnd(20)} ${String(speeds.length).padStart(5)}  ` +
+                `${fmt(percentile(speeds, 50))} ${fmt(percentile(speeds, 95))} ` +
+                `${fmt(Math.max(...speeds))}`
+        );
+    }
+
+    const still = [...byPhase].filter(([p]) => p.includes('stand')).flatMap(([, v]) => v);
+    const moving = [...byPhase]
+        .filter(([p]) => !p.includes('stand') && !p.includes('warmup'))
+        .flatMap(([, v]) => v);
+
+    if (still.length && moving.length) {
+        const ceiling = Math.max(...still);
+        const walking = percentile(moving, 50);
+        console.log(
+            `\n  standing still never exceeds ${ceiling.toFixed(2)} m/s; ` +
+                `walking runs ${walking.toFixed(2)} m/s median.`
+        );
+        console.log(`  separation: ${(walking / Math.max(ceiling, 0.01)).toFixed(1)}x`);
+    }
+}
+
+// Spread from a centroid only means "noise" when the tracker never moved.
+// On a walk it just measures how far someone walked, so saying it is noise
+// would be actively misleading.
 console.log('\n--- what this means ---');
-const p95Spread = percentile(spread, 95);
-const p95Step = percentile(steps, 95);
-console.log(`  95% of fixes land within ${p95Spread.toFixed(1)}m of the true position.`);
-console.log(`  A stationary tracker appears to move up to ${Math.max(...steps).toFixed(1)}m`);
-console.log(`  between fixes (95th percentile ${p95Step.toFixed(1)}m).`);
-console.log(`  Any movement threshold must clear that to avoid constant false alarms.`);
+if (guided) {
+    console.log('  This is a movement recording, so spread and per-fix distance are');
+    console.log('  real motion, not noise. Read the per-phase speeds above; compare');
+    console.log('  them against a stationary recording for the noise floor.');
+} else {
+    const p95Spread = percentile(spread, 95);
+    const p95Step = percentile(steps, 95);
+    console.log(`  95% of fixes land within ${p95Spread.toFixed(1)}m of the true position.`);
+    console.log(`  A stationary tracker appears to move up to ${Math.max(...steps).toFixed(1)}m`);
+    console.log(`  between fixes (95th percentile ${p95Step.toFixed(1)}m).`);
+    console.log(`  Any movement threshold must clear that to avoid constant false alarms.`);
+}
 
 /**
  * @param {string} label
