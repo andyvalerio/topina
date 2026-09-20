@@ -3,44 +3,41 @@
  *
  * Verifies that the baked-in client ID still works, that email+password auth
  * still gets a token, and that the pet and tracker show up on the account.
- * Prints the IDs the later steps need.
+ * Prints the IDs the later steps need, so they can go into `.env`.
  */
-import tractive from 'tractive';
+import { session } from './auth.js';
+import * as rest from './rest.js';
+import { credentials, missing } from './config.js';
 
-const { TRACTIVE_EMAIL, TRACTIVE_PASSWORD } = process.env;
-
-if (!TRACTIVE_EMAIL || !TRACTIVE_PASSWORD) {
-    console.error('Missing TRACTIVE_EMAIL / TRACTIVE_PASSWORD. Copy .env.example to .env and fill it in.');
+const blocked = missing('TRACTIVE_EMAIL', 'TRACTIVE_PASSWORD');
+if (blocked) {
+    console.error(blocked);
     process.exit(1);
 }
 
-const ok = await tractive.connect(TRACTIVE_EMAIL, TRACTIVE_PASSWORD);
-console.log('authenticated:', ok);
+const { token, userId, expiresAt } = await session(credentials);
+console.log('authenticated, user id:', userId);
+console.log('token expires:', new Date(expiresAt * 1000).toISOString());
 
-if (!ok) {
-    console.error('Auth failed. Check the password, or whether the API changed.');
-    process.exit(1);
-}
+const [pets, trackers] = await Promise.all([
+    rest.getPets(token, userId),
+    rest.getTrackers(token, userId),
+]);
 
-console.log('user id:', accountDetails.uid);
-
-const pets = await tractive.getPets();
-console.log('\n--- pets (raw) ---');
+console.log('\n--- pets ---');
 console.dir(pets, { depth: null });
-
-const trackers = await tractive.getAllTrackers();
-console.log('\n--- trackers (raw) ---');
+console.log('\n--- trackers ---');
 console.dir(trackers, { depth: null });
 
-// The wrapper's list endpoints return stubs; the detail calls have the real data.
+// The list endpoints return stubs; the detail calls carry the real payload.
 for (const { _id } of pets ?? []) {
-    const pet = await tractive.getPet(_id);
-    console.log(`\n--- pet ${_id} detail ---`);
-    console.dir(pet, { depth: null });
+    console.log(`\n--- pet ${_id} ---`);
+    console.dir(await rest.getPet(token, _id), { depth: null });
 }
 
 for (const { _id } of trackers ?? []) {
-    const tracker = await tractive.getTracker(_id);
-    console.log(`\n--- tracker ${_id} detail ---`);
-    console.dir(tracker, { depth: null });
+    console.log(`\n--- tracker ${_id} ---`);
+    console.dir(await rest.getTracker(token, _id), { depth: null });
 }
+
+console.log('\nPut these into .env as TRACTIVE_PET_ID and TRACTIVE_TRACKER_ID.');

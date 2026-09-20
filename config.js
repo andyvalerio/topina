@@ -5,8 +5,14 @@
  * the source of a public repo. It all arrives through the environment, and the
  * only thing checked in is the shape of it in `.env.example`.
  */
-const { TRACTIVE_EMAIL, TRACTIVE_PASSWORD, TRACTIVE_PET_ID, TRACTIVE_TRACKER_ID, PET_NAME } =
-    process.env;
+const {
+    TRACTIVE_EMAIL,
+    TRACTIVE_PASSWORD,
+    TRACTIVE_PET_ID,
+    TRACTIVE_TRACKER_ID,
+    TRACTIVE_USER_ID,
+    PET_NAME,
+} = process.env;
 
 export const credentials = {
     email: TRACTIVE_EMAIL,
@@ -15,6 +21,7 @@ export const credentials = {
 
 export const petId = TRACTIVE_PET_ID;
 export const trackerId = TRACTIVE_TRACKER_ID;
+export const userId = TRACTIVE_USER_ID;
 
 /** Falls back to something neutral so logs read sensibly on a fresh checkout. */
 export const petName = PET_NAME || 'the cat';

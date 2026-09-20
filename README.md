@@ -46,8 +46,8 @@ then do thresholds become real instead of guessed.
 |---|---|---|---|
 | ✅ 1 | Auth + identify | Token comes back; the tracker ID prints | Creds/API don't work → nothing else matters |
 | ✅ 2 | One-shot position | A real lat/long prints | REST works but data's useless/stale |
-| 3 | Channel connect | Raw NDJSON lines stream to stdout for 5 min | No push feed → fall back to polling |
-| 4 | Log to file | Events land in `.jsonl`; stationary noise-floor test done | Noise floor too high → movement heuristics dead |
+| ✅ 3 | Channel connect | Raw NDJSON lines stream to stdout | No push feed → fall back to polling |
+| ✅ 4 | Log to file | Events land in `.jsonl`; stationary noise-floor test done | Noise floor too high → movement heuristics dead |
 | 5 | Derived signals in terminal | speed / thrash / staleness printing live | Signals too noisy to read |
 | 6 | Strip-chart dashboard | Browser shows live traces | — |
 | 7 | Thresholds from observed data | Detectors fire on real incidents | — |
@@ -105,12 +105,103 @@ A one-shot `device_pos_report` comes back complete and usable:
 - **Field names differ between REST and the channel** for the same quantity:
   `pos_uncertainty` here, `accuracy` on a channel event (**C12**).
 
-### The noise floor test (step 4)
+## What step 3 told us
 
-The one thing that could kill the whole premise. If a stationary tracker jitters
-±10m, the derived speed of a *sleeping* cat is ~2 m/s and every movement-based
-detector is dead on arrival. Leave the tracker on a table for 10 minutes, log
-every event, look at the spread. Do this before building any detector.
+**The channel works.** `POST channel.tractive.com/3/channel` holds open and
+streams NDJSON. Implemented in [channel.js](channel.js), driven by
+`npm run listen [seconds]`.
+
+What arrives:
+
+```
+  1.0s  handshake
+  1.1s  tracker_status    ← full state snapshot
+  4.8s  keep-alive
+  9.8s  keep-alive        ← every 5s, exactly
+```
+
+The `tracker_status` snapshot is richer than expected — position, hardware,
+and the live state of every control:
+
+- `position` — `latlong`, `sensor_used`, **`accuracy`**, `speed`, and **two
+  timestamps**: `time` (fix taken) and `time_rcvd` (server received it),
+  minutes apart. Which one staleness means has to be explicit (**C14**).
+- `hardware` — `battery_level`, `temperature_state`, `power_saving_zone_id`
+- `led_control`, `buzzer_control`, `live_tracking` — each with `active`,
+  `timeout`, `remaining`, `pending`. So control state is observable, not just
+  settable.
+- `tracker_state`, `charging_state`, `battery_state`
+
+Confirmed **C12**: the channel says `accuracy` where REST says
+`pos_uncertainty`. There's a test asserting both halves of that, so a silent
+flip can't slip through.
+
+We also now have our own [auth.js](auth.js) — the wrapper hides the client ID
+and keeps its token on `globalThis`, neither of which the channel can use. That
+leaves two auth paths, which is why **Q12** asks whether the wrapper still earns
+its place.
+
+## What the live-tracking probe told us
+
+Live tracking turned on cleanly and stayed on — `active: true`, `remaining:
+1794` counting down the 1800s device timeout. It did not self-disable at home.
+`npm run live [seconds]` runs a bounded window and turns it back off afterwards.
+
+Three findings, two of which change how we build:
+
+**Channel events are deltas, not snapshots.** The first `tracker_status` is
+complete; every one after it carries *only what changed*:
+
+```js
+{ tracker_id: '...', tracker_state: 'OPERATIONAL',
+  live_tracking: { active: true, remaining: 1794, ... },
+  charging_state: 'NOT_CHARGING', message: 'tracker_status' }
+```
+
+No `position`, no `hardware`. A consumer that replaces its state on each event
+loses them. State has to be **merged** (**C16**, **F17**).
+
+**Indoors, live mode produces nothing.** 55 seconds of confirmed-active live
+tracking with the cat inside yielded **zero** new fixes — just the same stale
+position re-sent. GPS can't see sky through a roof. Harmless for the product,
+but it means every cadence and noise-floor measurement has to be taken
+**outdoors**, including step 4's stationary test (**C17**).
+
+**Repeated positions carry an identical `time`.** Deduplicate on it, or each
+repeat becomes a zero-distance, zero-elapsed fix and divides by zero in the
+speed calculation (**C18**).
+
+Commands acknowledge in two stages — `pending: true`, then `active: true` with
+a `started_at` (**C19**), so we can tell a command landed rather than hoping.
+
+Still unanswered: **the real fix interval in live mode** (Q1). That needs her
+outdoors.
+
+### The noise floor test (step 4) — done, and it passed
+
+The one thing that could have killed the premise. Measured with the tracker
+sitting stationary in the garden, live tracking on, 39 fixes over 2.8 minutes:
+
+| | median | p95 | max |
+|---|---|---|---|
+| fix interval | **4.0s** | 5.0s | 11.0s |
+| spread from true position | 0.52m | 0.75m | 1.11m |
+| apparent movement per fix | 0.06m | 0.58m | **0.66m** |
+| noise in derived speed | 0.01 m/s | 0.17 m/s | **0.28 m/s** |
+
+**Sub-metre.** A walking cat is around 1 m/s and a sprinting one 3-8 m/s,
+against a speed noise ceiling of 0.28 m/s — an order of magnitude of headroom.
+The movement heuristics are viable, and every threshold now has a measured
+floor to clear rather than a guessed one.
+
+Two caveats worth keeping honest: this is one recording, and it is open sky.
+A cat under a car or deep in a hedge is the case that matters most and is
+still unmeasured (**Q14**) — watch `sensor_used` dropping away from GPS.
+
+Also learned here: **live-mode fixes carry no `speed` field at all** (39 of 39
+undefined), though the REST report does. Deriving speed ourselves is mandatory.
+And `accuracy` reads `0` on every settled live fix, so it is not a usable
+quality gate (**Q4**).
 
 ## Signals
 
@@ -137,6 +228,53 @@ continuous signal, altitude delta (fence/wall/tree), time-of-day banding.
    pet or tracker IDs, no coordinates or addresses. It comes from the
    environment via [config.js](config.js); only `.env.example` is committed.
    Scrub probe output before pasting it anywhere.
+
+## Authentication
+
+Log in once, keep the token, log in again only when it runs out. Tokens last
+about two months and there is no refresh token.
+
+This is not an optimisation. **The auth endpoint rate-limits hard** — a handful
+of logins returns HTTP 429 with no `Retry-After`, and the lockout outlasts ten
+minutes, taking the whole API with it. A process that logs in on every run will
+lock the account out. Learned the hard way.
+
+`session()` in [auth.js](auth.js) handles it: reads `.token.json`, renews only
+within an hour of expiry, and if renewal is refused while the current token is
+still valid, carries on with the current token. Use `session()`, never
+`authenticate()` — the latter is the real login and should be rare.
+
+`.token.json` holds a bearer token: gitignored, written 0600.
+
+**If you do get locked out**, the lockout is on the auth endpoint alone —
+existing tokens keep working, and one from elsewhere works immediately. Open
+my.tractive.com, DevTools → Network, copy any request's `Authorization: Bearer`
+value, then:
+
+```bash
+npm run token -- <the-token>
+```
+
+It verifies the token against a real endpoint before installing it, so a
+mistyped paste fails there rather than three steps later. This is also the way
+to bootstrap without ever calling auth.
+
+## Recording and analysis
+
+```bash
+npm run record 180        # live tracking on, record 3 min, live tracking off
+npm run record 180 -- --no-live    # record without touching the device
+node analyse.js data/<recording>.jsonl
+```
+
+Recordings land in `data/` as one JSON object per line, raw and unfiltered.
+They are gitignored — they contain coordinates (**G3**) — and they are the
+corpus the detector thresholds get tuned against.
+
+`analyse.js` reports fix cadence, the spread of a stationary tracker, apparent
+movement, derived speed, and accuracy. It drops the warm-up fixes — the stale
+cached report and the catch-up jump that arrive before the cadence settles —
+since their distance would swamp the noise floor being measured.
 
 ## Setup
 

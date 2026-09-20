@@ -7,24 +7,15 @@
  * and they skip rather than fail when either is missing.
  *
  * The API rate-limits *per resource* after roughly two calls in quick
- * succession, so everything here is cached and fetched at most once per run.
- * Tests must never call the same endpoint twice.
+ * succession, so everything here is fetched at most once per run. Tests must
+ * never call the same endpoint twice.
  */
-import tractive from 'tractive';
+import { session as authSession } from '../auth.js';
+import { isRateLimited } from '../rest.js';
 import { credentials, missing } from '../config.js';
 
 /** Reason string when credentials are absent, or false when we're good to go. */
 export const missingCredentials = missing('TRACTIVE_EMAIL', 'TRACTIVE_PASSWORD');
-
-/**
- * Rate-limited responses come back as a plain error object with HTTP 200, so
- * they surface as missing fields rather than thrown errors. Name them.
- * @param {unknown} response
- * @returns {boolean}
- */
-export function isRateLimited(response) {
-    return response?.code === 4006;
-}
 
 /**
  * Assert a response isn't a rate-limit error, with a message that says what to
@@ -47,16 +38,4 @@ const once = (fn) => {
     return () => (promise ??= fn());
 };
 
-export const connect = once(() => tractive.connect(credentials.email, credentials.password));
-
-export const pets = once(async () => {
-    await connect();
-    return tractive.getPets();
-});
-
-export const trackers = once(async () => {
-    await connect();
-    return tractive.getAllTrackers();
-});
-
-export { tractive };
+export const session = once(() => authSession(credentials));

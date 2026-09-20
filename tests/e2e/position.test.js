@@ -8,7 +8,8 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertNotRateLimited, connect, missingCredentials, tractive } from '../helpers.js';
+import { assertNotRateLimited, missingCredentials, session } from '../helpers.js';
+import * as rest from '../../rest.js';
 import { missing, trackerId } from '../../config.js';
 
 const skip = missingCredentials || missing('TRACTIVE_TRACKER_ID');
@@ -16,8 +17,8 @@ const skip = missingCredentials || missing('TRACTIVE_TRACKER_ID');
 /** One call, shared: `device_pos_report` is rate-limited like everything else. */
 let cached;
 const report = async () => {
-    await connect();
-    cached ??= await tractive.getTrackerLocation(trackerId);
+    const { token } = await session();
+    cached ??= await rest.getPosition(token, trackerId);
     assertNotRateLimited(cached, 'the position report');
     return cached;
 };
@@ -48,7 +49,12 @@ test('the position report is timestamped in seconds', { skip }, async () => {
 test('the report carries the fields the detectors need', { skip }, async () => {
     const fix = await report();
 
-    assert.equal(typeof fix.speed, 'number', 'speed must be usable as a number');
+    // speed is optional: the REST report carries it when the last fix came
+    // from normal reporting, but mirrors a live fix — which has none — after
+    // live tracking has run. Derived speed is what detectors actually use.
+    if (fix.speed !== undefined) {
+        assert.equal(typeof fix.speed, 'number', 'speed, when present, must be a number');
+    }
     assert.equal(typeof fix.altitude, 'number');
     assert.equal(typeof fix.sensor_used, 'string');
 
@@ -57,10 +63,12 @@ test('the report carries the fields the detectors need', { skip }, async () => {
     assert.ok(fix.pos_uncertainty >= 0, 'accuracy cannot be negative');
 });
 
-test('the report reverse-geocodes to an address', { skip }, async () => {
-    const { address } = await report();
+test('a position reverse-geocodes to an address', { skip }, async () => {
+    const { token } = await session();
+    const { latlong } = await report();
+    const address = await rest.getAddress(token, latlong);
 
     // Not needed for detection, but it's free context when an alert fires.
-    assert.ok(address, 'expected an address block');
+    assertNotRateLimited(address, 'the address');
     assert.equal(typeof address.full_address, 'string');
 });
