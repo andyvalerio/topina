@@ -47,6 +47,14 @@ leave klipper-lb contending with cluster DNS for the host port — topina would
 never get an external IP, and cluster DNS is not worth disturbing. The
 container still listens on 8080 inside the pod, where nothing collides.
 
+## The clock
+
+The deployment must set `TZ` (`Europe/Stockholm`). Every schedule here is in
+local-clock hours and a container has none — `node:22-slim` is UTC, so an
+unset `TZ` runs the 07:00-17:00 window at 09:00-19:00 local in summer without
+erroring or looking wrong (**C39**). An IANA zone, not an offset, so October's
+switch to CET is handled.
+
 ## Where the data lives
 
 `/home/andy/dev/topina/config` on the NVMe root disk, mounted at `/config`.

@@ -446,6 +446,16 @@ and still throws; `Number(' ')` is 0, not NaN), and the handler needs a
 catch-all so no endpoint can ever end the process. A monitor that a mistyped
 URL can kill is not a monitor (**D5**).
 
+**C39** — **A container has no local clock.** Every schedule here is written
+in local-clock hours — the outing window, quiet hours, the daily heartbeat all
+read `new Date().getHours()` — and `node:22-slim` runs UTC. Deployed without
+`TZ`, a 07:00-17:00 window silently ran 09:00-19:00 in Swedish summer time:
+nothing errors, nothing looks wrong, it just starts watching her two hours
+after she is already outside. Found on the first deployment. The zone must be
+an IANA name (`Europe/Stockholm`), never a fixed offset, so the October switch
+to CET does not reintroduce it at one hour instead of two.
+
+
 
 **C34** — **Charging transitions push promptly on the channel**, but only in
 the direction that actually happens. Reconnecting produced `→ charging` within
