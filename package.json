@@ -14,6 +14,7 @@
     "record": "node --env-file=.env record.js",
     "analyse": "node analyse.js",
     "test:unit": "node --test \"tests/unit/*.test.js\"",
-    "token": "node --env-file=.env token.js"
+    "token": "node --env-file=.env token.js",
+    "watch": "node --env-file-if-exists=.env watch.js"
   }
 }

@@ -69,10 +69,18 @@ recordings land in `data/` and are gitignored (**G3**).*
 
 **F6** · agreed — Derive per-fix signals from the position stream: staleness,
 speed, thrash ratio, distance from home, accuracy, sensor type. Speed **must**
-be derived, since live fixes carry none (**Q3**).
+be derived, since live fixes carry none (**Q3**). *Implemented in `signals.js`,
+all pure functions with the clock injected.*
 
-**F7** · provisional — Maintain a rolling in-memory window (~10 min) of recent
-fixes, sufficient for all windowed signals.
+**F7** · agreed — Maintain a rolling window of recent fixes, trimmed by the
+tracker's clock. *Implemented in `signals.js`; 60s, which at a 4s cadence is
+~15 fixes.*
+
+**F18** · agreed — The signal pipeline reads from an interchangeable source, so
+a recording replays through exactly the same code as a live connection
+(`sources.js`). This is how detectors get tuned without needing a cat, weather
+and an incident to coincide — and it immediately earned itself by exposing the
+thrash defect in **C24**.
 
 **F17** · agreed — Merge channel events into a running tracker state rather than
 replacing it, since events are partial (**C16**), and deduplicate positions on
@@ -226,6 +234,15 @@ clear ~8s late, and any analysis that trusts a label at a phase boundary will
 put sprint speeds in the "standing still" bucket. **This is the floor on how
 "immediate" notification can ever be.**
 
+**C24** — **Thrash ratio is only meaningful while actually moving.** A
+stationary tracker's sub-metre jitter accumulates path length while going
+nowhere, which scores exactly like a scuffle: replaying a real recording showed
+standing still rating 2.4-3.4 against walking's 1.3-1.6 — inverted. The ratio
+is now gated on average speed across the window clearing `MOVING_MS` (0.4 m/s,
+which sits in the measured gap between 0.23 still and 0.69 walking slowly).
+Gated, it reads null when still, ~1.3 walking in a line, and 5.7-8.8 when
+jogging around a confined space — which is the signature a scuffle should have.
+
 **C23** — Movement recordings must not be analysed as noise. Spread from a
 centroid measures how far someone walked, not GPS error. `analyse.js` reports
 the noise-floor interpretation only for stationary recordings.
@@ -278,6 +295,47 @@ zero-elapsed fix and poisons the speed calculation with a division by zero.
 **C15** — Authentication now exists twice: the wrapper's (used by the REST calls)
 and ours in `auth.js` (used by the channel, because the wrapper hides the client
 ID and keeps its token on `globalThis`). Tolerable for now, resolved by **Q12**.
+
+---
+
+## Deployment (step 9)
+
+Target is the existing K3s home server, following the same GitOps pattern as
+`showgrab`: a kustomize base in `apps/topina/`, an overlay in
+`overlays/prod/topina/`, and ArgoCD syncing from git. Image published to GHCR,
+with Argo CD Image Updater bumping semver tags on GitHub release.
+
+**D1** · agreed — **The token cache must survive restarts.** This is the single
+most important deployment constraint and it is not obvious. Without persistence
+every pod restart is a real login, and a crash-looping pod would hammer the auth
+endpoint and lock the account out of the API entirely (**C20**) — taking the
+monitoring down in a way that a restart cannot fix. Needs a PVC, and the cache
+path must be configurable rather than the working directory.
+
+**D2** · agreed — Back off on auth failure. Pair with **D1**: persistence stops
+the common case, backoff stops the pathological one.
+
+**D3** · agreed — `TRACTIVE_PASSWORD` goes in a Kubernetes Secret, never in a
+manifest. `showgrab` keeps its config as plain env in the deployment, which is
+fine for a feed URL and not for a credential.
+
+**D4** · agreed — **Single replica.** Two pods would hold two channels and
+fight over live tracking, each turning it off under the other.
+
+**D5** · provisional — A health endpoint whose meaning is *the channel is
+connected and events are arriving*, not merely that the process is alive. A
+monitor that has silently stopped monitoring is the failure worth catching, and
+process liveness would not catch it.
+
+**D6** · agreed — `enableServiceLinks: false`. Kubernetes injects
+`<SERVICE_NAME>_PORT` env vars for every Service in the namespace; `showgrab`
+crash-looped on exactly this when the injected variable collided with its own.
+Our variables are `TRACTIVE_*` and `PET_NAME` so a `topina` Service would not
+collide today, but the failure is silent enough to be worth pre-empting.
+
+**D7** · open — Whether recordings (**F4**) are written in production at all. A
+PVC keeps the tuning corpus growing; the alternative is recording only during
+deliberate sessions. They contain coordinates either way (**G3**).
 
 ---
 

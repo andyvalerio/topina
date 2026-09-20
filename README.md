@@ -48,10 +48,11 @@ then do thresholds become real instead of guessed.
 | ✅ 2 | One-shot position | A real lat/long prints | REST works but data's useless/stale |
 | ✅ 3 | Channel connect | Raw NDJSON lines stream to stdout | No push feed → fall back to polling |
 | ✅ 4 | Log to file | Events land in `.jsonl`; stationary noise-floor test done | Noise floor too high → movement heuristics dead |
-| 5 | Derived signals in terminal | speed / thrash / staleness printing live | Signals too noisy to read |
+| ✅ 5 | Derived signals in terminal | speed / thrash / staleness printing live | Signals too noisy to read |
 | 6 | Strip-chart dashboard | Browser shows live traces | — |
 | 7 | Thresholds from observed data | Detectors fire on real incidents | — |
-| 8 | Notifications + deploy to Beelink | Phone buzzes | — |
+| 8 | Notifications | Phone buzzes | — |
+| 9 | Deploy to the Beelink | Running in K3s via ArgoCD | — |
 
 Steps 1-3 are one evening. Everything past 4 depends on what the data looks like.
 
@@ -252,6 +253,41 @@ continuous signal, altitude delta (fence/wall/tree), time-of-day banding.
    pet or tracker IDs, no coordinates or addresses. It comes from the
    environment via [config.js](config.js); only `.env.example` is committed.
    Scrub probe output before pasting it anywhere.
+
+## Watching the signals
+
+```bash
+npm run watch                                    # live, live tracking on
+npm run watch -- --no-live                       # live, without touching the device
+npm run watch -- --replay data/<file>.jsonl      # replay a recording
+npm run watch -- --replay data/<file>.jsonl --pace 1   # ...in real time
+```
+
+```
+  speed   moved  intvl  thrash   home   acc  sensor  phase
+   0.69     2.7      4       -     41     0     GPS   2-walk
+   1.00     4.0      4     1.8     52     0     GPS   3-walk
+   1.58     6.3      4     5.7     38     0     GPS   4-fast
+```
+
+Replay runs the recording through **exactly the same code** as a live
+connection — same merging, same dedupe, same signals — because both sources
+yield `{ receivedMs, event }` and the clock is injected rather than read.
+Detectors can therefore be tuned against the corpus without needing a cat,
+weather and an incident to coincide.
+
+That paid for itself immediately. Replaying the measured walk showed the thrash
+ratio reading **2.4-3.4 while standing still** and only **1.3-1.6 while
+walking** — inverted, because a stationary tracker's jitter accumulates path
+length while going nowhere and so scores like a scuffle. It is now gated on
+average speed clearing 0.4 m/s, which sits in the measured gap between standing
+(0.23) and walking slowly (0.69). Gated, it reads nothing when still, ~1.3
+walking in a line, and 5.7-8.8 while jogging around a confined space — which is
+the shape a real scuffle should have.
+
+Staleness runs on its own timer rather than off the event stream, since the
+thing it measures is the *absence* of events: nothing arriving means nothing
+would otherwise recalculate.
 
 ## Authentication
 
