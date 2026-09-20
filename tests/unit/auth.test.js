@@ -8,7 +8,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isUsable, needsRenewal, REFRESH_MARGIN_S } from '../../auth.js';
+import { backoffFor, BACKOFF_MS, isUsable, needsRenewal, REFRESH_MARGIN_S } from '../../auth.js';
 
 const NOW = 1_800_000_000;
 const expiring = (inSeconds) => ({ expiresAt: NOW + inSeconds });
@@ -49,4 +49,27 @@ test('an expired token is not usable', () => {
 
 test('a missing token is not usable', () => {
     assert.equal(isUsable(null, NOW), false);
+});
+
+test('no failures means no waiting', () => {
+    assert.equal(backoffFor(0), 0);
+});
+
+test('backoff grows with consecutive failures', () => {
+    // The auth endpoint locks out for tens of minutes and sends no
+    // Retry-After, so retrying briskly turns a blip into a long outage.
+    assert.ok(backoffFor(2) > backoffFor(1));
+    assert.ok(backoffFor(3) > backoffFor(2));
+});
+
+test('backoff caps rather than growing without bound', () => {
+    // A pod that has been crash-looping for a day must still try again
+    // eventually, and must not be waiting a week by then.
+    assert.equal(backoffFor(99), BACKOFF_MS.at(-1));
+    assert.ok(backoffFor(99) <= 3600_000, 'never wait longer than an hour');
+});
+
+test('the first backoff is long enough to matter', () => {
+    // A one-second retry would hammer the endpoint that just refused us.
+    assert.ok(backoffFor(1) >= 10_000);
 });

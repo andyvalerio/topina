@@ -1,0 +1,10 @@
+# Nothing identifying, and nothing large, belongs in the image.
+.env
+.token.json
+.fcm-service-account.json
+data/
+app/
+node_modules/
+tests/
+.git/
+*.md

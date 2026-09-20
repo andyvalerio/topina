@@ -1,0 +1,18 @@
+name: Tests
+
+# Unit tests only. The end-to-end suite talks to the real Tractive API with
+# real credentials, which do not belong in CI — and its rate limits would make
+# a shared runner flaky anyway.
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm run test:unit

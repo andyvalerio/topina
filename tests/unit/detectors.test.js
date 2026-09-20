@@ -34,6 +34,29 @@ test('jogging pace is still not a sprint', () => {
     assert.deepEqual(findings(reading({ speed: 1.58 })), []);
 });
 
+test('her ordinary fast moments are not sprints', () => {
+    // p99 of a week of her own movement is 1.49 m/s. If that alarmed, the
+    // alarm would fire dozens of times a week and be worth nothing.
+    assert.deepEqual(findings(reading({ speed: 1.49 })), []);
+});
+
+test('a real bolt is a sprint', () => {
+    // Her observed maximum over that week was 9.38 m/s.
+    assert.equal(findings(reading({ speed: 9.38 }))[0]?.code, 'sprint');
+});
+
+test('her normal roaming range is not far from home', () => {
+    // p99 of her distance from home is 62m; alarming there would mean
+    // alarming on an ordinary afternoon.
+    assert.deepEqual(findings(reading({ fromHome: 62 })), []);
+});
+
+test('beyond her known range is flagged', () => {
+    // Her all-time maximum is 142m, so this is reachable — unlike the
+    // original 150m threshold, which could never fire.
+    assert.equal(findings(reading({ fromHome: 120 }))[0]?.code, 'far-from-home');
+});
+
 test('a sprint is an alarm', () => {
     const found = findings(reading({ speed: 3.5 }));
 
@@ -154,8 +177,45 @@ test('conditions sustain independently of each other', () => {
     assert.equal(second.pending[0].code, 'sprint');
 });
 
+test('a disabled detector stays silent', () => {
+    // Silencing must be explicit and visible, not achieved by shoving a
+    // threshold out of reach where the reason is lost.
+    const off = { ...DEFAULTS, sprintEnabled: false };
+
+    assert.deepEqual(findings(reading({ speed: 9 }), off), []);
+});
+
+test('disabling one detector leaves the others working', () => {
+    const off = { ...DEFAULTS, sprintEnabled: false };
+    const found = findings(reading({ speed: 9, staleness: 200 }), off);
+
+    assert.equal(found.length, 1);
+    assert.equal(found[0].code, 'silence');
+});
+
+test('every detector can be switched off', () => {
+    const allOff = {
+        ...DEFAULTS,
+        sprintEnabled: false, thrashEnabled: false, silenceEnabled: false,
+        noGpsEnabled: false, farFromHomeEnabled: false,
+    };
+    const everything = reading({ speed: 9, thrash: 20, staleness: 999, fromHome: 900, sensor: 'CELL' });
+
+    assert.deepEqual(findings(everything, allOff), []);
+});
+
 test('thresholds are overridable without touching the logic', () => {
     const jumpy = createDetector({ ...DEFAULTS, sprint: 1.0, sustain: 1 });
 
     assert.equal(jumpy.assess(reading({ speed: 1.2 })).level, 'alarm');
+});
+
+test('assess accepts tightened thresholds for one reading', () => {
+    // Inside a danger zone the same behaviour means more, so thresholds are
+    // passed in per reading rather than baked into the detector.
+    const detector = createDetector({ ...DEFAULTS, sustain: 1 });
+    const tight = { ...DEFAULTS, sustain: 1, sprint: 1.0 };
+
+    assert.equal(detector.assess(reading({ speed: 1.5 })).level, 'calm');
+    assert.equal(detector.assess(reading({ speed: 1.5 }), tight).level, 'alarm');
 });

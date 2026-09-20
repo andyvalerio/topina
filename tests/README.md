@@ -46,6 +46,33 @@ live tracking drains the battery in hours, and the buzzer is audible to the
 cat. A test suite must never fire those as a side effect of `npm test`.
 They're exercised deliberately through `npm run live`.
 
+## Coordinates (`tests/fixtures/place.js`)
+
+Every coordinate in these tests is invented. Real ones would put the house —
+and a neighbour's — into a public repo, which **G3** forbids, and nothing is
+gained by them: every assertion here is relative (this point is inside that
+box, these two are a metre apart), so the tests prove geometry, not geography.
+Verified by running the whole suite against an injected real location and
+against Sydney; both pass.
+
+Fixtures say what they mean — `offset(HOME, -50, 30)` rather than fifteen
+opaque decimals that happen to sit 30m east — so the property under test is
+readable instead of pasted.
+
+Real geometry can still be exercised without committing it:
+
+```bash
+TEST_HOME_LAT=... TEST_HOME_LON=... npm test
+```
+
+One trap worth knowing. `place.js` derives metres-per-degree from the same
+sphere `geo.js` measures with (`EARTH_RADIUS_M`). An earlier constant differed
+by 0.07%, which was enough to flip three assertions that sat exactly on a
+threshold — `fromHome > 8` against a fixture 8m from home, and a thrash ratio
+that returns null below a metre of net displacement against a fixture at
+exactly one metre. They had been passing on a rounding artefact rather than on
+behaviour. Fixtures now sit clear of their thresholds.
+
 ### Conventions
 
 - Authenticate through `connect()` in [`../helpers.js`](helpers.js) — it caches,

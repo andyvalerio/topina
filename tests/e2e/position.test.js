@@ -51,8 +51,11 @@ test('the report carries the fields the detectors need', { skip }, async () => {
 
     // speed is optional: the REST report carries it when the last fix came
     // from normal reporting, but mirrors a live fix — which has none — after
-    // live tracking has run. Derived speed is what detectors actually use.
-    if (fix.speed !== undefined) {
+    // live tracking has run. "None" arrives as an explicit null rather than a
+    // missing key, and `typeof null` is 'object', so absence has to be tested
+    // with `!= null` and not `!== undefined`. Derived speed is what the
+    // detectors actually use, so a null here changes nothing for them.
+    if (fix.speed != null) {
         assert.equal(typeof fix.speed, 'number', 'speed, when present, must be a number');
     }
     assert.equal(typeof fix.altitude, 'number');

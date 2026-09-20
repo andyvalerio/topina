@@ -26,6 +26,16 @@ account details. It all comes from the environment via `config.js`, and only
 `.env.example` — with empty values — is committed. Probe output pasted into
 issues or docs gets scrubbed first.
 
+Extended during the pre-push review: **this covers test fixtures and
+documentation as much as code.** Real coordinates had accumulated in the geo,
+signals, notifications and zone tests, and in a README example — including the
+neighbour's actual 100m geofence, copied from the account at fifteen decimal
+places. A third party's home location is not ours to publish. Coordinates now
+come from `tests/fixtures/place.js`, invented by default and injectable via
+`TEST_HOME_LAT`/`TEST_HOME_LON`; the runtime was already clean, taking home
+from `pet.home_location` and the danger zone from the geofence API.
+
+
 ---
 
 ## Purpose
@@ -38,6 +48,79 @@ and being cornered or trapped. Not theft, not general lost-pet recovery.
 
 **P3** · agreed — Latency matters more than completeness. A late-but-perfect
 signal is worthless; the point is to intervene while it's happening.
+
+---
+
+## The outing lifecycle
+
+The core loop, and the thing every other behaviour hangs off.
+
+**L1** · agreed — Sit on the channel **permanently**. Never poll: the REST API
+rate-limits per resource after roughly two calls and reports it as HTTP 200
+with an error body (**C7**).
+
+**L2** · **done** — **A fresh GPS fix during a live sample means she is out.**
+No geometry. Indoors, live tracking produces no fresh fixes at all — 55 seconds
+of confirmed-active live tracking yielded only the same stale position re-sent
+(**C17**); outdoors it produces one every four seconds. What was recorded as a
+limitation turned out to be the discriminator.
+
+Distance from home is used for exactly one thing: when fixes stop, telling
+"walked back indoors" from "lost signal out there" — near home means home, far
+means trouble. It cannot be used for anything else (**C31**).
+
+*Implemented in `outing.js`, a pure state machine; driven from `server.js`.*
+
+**L2-old** · superseded — There was no free leaving signal: zone exit
+cannot fire (**C30**), distance cannot discriminate (**C31**), and normal mode
+is ten minutes behind anyway (**C32**). Either a tight house geofence fires
+promptly (**Q21**), or the trigger must be bought with battery — sampling live
+briefly on a cycle, or simply staying live through her active hours. Acceptance
+test, in the user's words: *a tracker placed on the garden table must be
+recognised as "she is out" and put the tracker into live mode within a
+reasonable time.*
+
+**L2a** · agreed — Whatever the signal, it is a **trigger to look, not a
+conclusion**.
+On it, go live and check. If she is genuinely out, confirm; if it was a blip at
+the edge of the house, stand down quietly.
+
+```
+HOME ──(zone exit / distance)──► VERIFYING ──┬─ confirmed → OUT
+                                             └─ false     → HOME (silent)
+OUT ──(home, sustained)──► HOME
+```
+
+**L3** · agreed — Notify **"Topina is out"** on confirmation, and on her
+return. These are information, not alarms, and must feel different from one
+(**N9**). They double as proof the system is alive.
+
+**L4** · **done** — Live tracking stays on for the whole outing, **re-armed**
+as the device's own 1800s timeout expires (**C11**). Re-arming needs no special
+path: the state machine asks for live every tick, the snapshot reports whether
+it is actually on, and a lapse simply gets asked for again. One fewer thing to
+forget.
+
+**L8** · **done** — **Charging means she is indoors** — but only when it says
+`CHARGING`. A finished charge reads `NOT_CHARGING` while still plugged in
+(**C33**), so the check is one-directional by design: it can confirm she is in,
+never that she is out. The tracker is on a
+charger most of the time she is in, so a charging state skips the sample
+entirely — no command sent, no battery spent, no ambiguity.
+
+**L9** · **done** — No toggling while she is out. Live stays on as long as
+fixes arrive; sampling only resumes once she is home or the signal is lost.
+
+**L5** · **done** — Manual control from the dashboard overrides automation for a
+configurable hold, then reverts to automatic. `HELD_OFF` is permitted at any
+time, including mid-outing — it is the user's call, not the system's.
+
+**L6** · agreed — Holds must serve re-arming too: a `HELD_ON` longer than the
+device timeout still needs re-arming, or the hold is a lie.
+
+**L7** · provisional — Battery: notify every 10% (configurable). She is out
+about an hour at a time, so drain is not expected to be a limit, but it is
+unmeasured — one full outing under live tracking will tell us.
 
 ---
 
@@ -142,15 +225,64 @@ logged corpus.
 
 ### Alerting
 
-**F14** · deferred — Push notification to phone on detection. Mechanism
-undecided (ntfy / Telegram / Pushover / Home Assistant companion app). Not being
-built now.
+**F14** · agreed — Push notification to phone on detection, over **FCM** to a
+purpose-built Android app in `app/`. *Implemented in `notify.js` (no SDK: a
+signed JWT exchanged for an access token, then one POST) and `alerts.js`.*
+Android only — iOS was explicitly out of scope, which removes the relay
+complication entirely.
 
-**F15** · deferred — Escalation tiers, so that a minor anomaly and "she's being
-attacked" don't feel the same.
+**F15** · **done** — Three tiers: `info` (out, back, signal restored, zone
+entry), `warn` (elevated findings, battery steps), `alarm` (urgent findings,
+signal lost, nearly flat battery). Only `alarm` goes at Android high priority.
 
-**F16** · deferred — Remote intervention: fire the tracker's buzzer or LED from
-the dashboard or from an alert, to break up a standoff. The API supports it.
+**F31** · **done** — Every notification body stands alone: what happened, how
+far from home, and the coordinates. Away from home there is no dashboard
+(**N12**).
+
+**F32** · **done** — Battery is reported each time it falls past a configurable
+step, and only while she is out — a charging tracker losing a percent is not
+news.
+
+**F22** · agreed — A finding pushes when it **appears**, then stays quiet for a
+cooldown even while it keeps firing. Detectors run every four seconds; a dozen
+buzzes per incident trains you to ignore the phone, and an ignored alert is
+worse than none.
+
+**F23** · agreed — A failed push must never take the monitor down. Sending is
+fire-and-forget with its errors logged.
+
+**F24** · agreed — The **enemy zone** is read from the Tractive API — it
+already exists there as a `DANGER` geofence named by the user, so there is
+nothing to configure and it stays editable in the official app.
+
+**F25** · agreed — Presence in the enemy zone is a **risk modifier, not an
+alarm**. Measured over a week she is inside it 7.1% of the time; alarming on
+entry would fire constantly. Inside it, thresholds tighten and findings
+escalate a tier. A bare entry is at most quiet information.
+
+**F26** · agreed — Zone membership requires **dwell** — consecutive fixes or
+elapsed time inside — because the zone's nearest corner is 30m from home and
+ordinary GPS scatter near the house crosses the boundary. Nine of eleven
+apparent "visits" in a week were one or two fixes of jitter (**C27**).
+
+**F27** · agreed — Notifications carry the facts in the body — what happened,
+distance from home, coordinates — and **tap through to the Tractive app** at
+`https://applink.tractive.com/`, which lands on her live map. We do not build a
+map.
+
+**F28** · **done** — Incidents are first-class: opened when a finding confirms,
+extended while anything stays active, closed after quiet, stored with track,
+peak values and duration.
+
+**F29** · **done** — The dashboard can **export any time window** for offline
+analysis. Analysis happens outside the system; the dashboard offers only light
+labelling, not an analysis workbench.
+
+**F30** · **done** — Silence from the service must itself be noticed. A dead
+monitor looks exactly like a calm afternoon.
+
+**F16** · **dropped.** Remote intervention — firing the buzzer from a
+notification — was considered and rejected.
 
 ---
 
@@ -162,7 +294,15 @@ proven to show something real, it runs locally with `node`.
 
 **N2** · agreed — Single cat, single tracker. No multi-pet abstraction.
 
-**N3** · agreed — LAN only, no authentication on the dashboard, for now.
+**N3** · revised — LAN **and tailnet**, no authentication on the dashboard.
+Originally LAN-only. In deployment it is published over Tailscale
+(`tailscale serve --tcp 8100`, tailnet-only — *not* Funnel, so never on the
+public internet), matching how the other services on that machine are
+reached. The tailnet is a private network of the owner's own devices, so this
+widens reach without exposing the page publicly. The dashboard still has no
+authentication, so anything with tailnet access can see her live location —
+acceptable while the tailnet holds only the owner's devices, and the reason
+Funnel stays off.
 
 **N4** · agreed — Credentials live in environment variables, never in the repo.
 
@@ -171,6 +311,24 @@ frontend build step. Achieved by dropping the wrapper (**Q12**).
 
 **N7** · agreed — All identifying values (credentials, pet and tracker IDs, user
 id, pet name) are read from the environment through `config.js`. See **G3**.
+
+**N9** · **done** — Every configuration point — thresholds, intervals, holds,
+each detector's on/off — is **visible and editable in the dashboard**, and
+survives a restart. Seeded from the environment once, then the stored value
+wins, following the pattern already used by `showgrab`. Where a value came from
+must be visible, since a later environment edit silently doing nothing is
+otherwise baffling.
+
+**N10** · **done** — Persistence is SQLite on a volume (`node:sqlite`, so still
+zero dependencies), holding settings, meaningful events and incidents.
+
+**N11** · agreed — **Never log keep-alives.** They arrive every 5 seconds and
+carry nothing but liveness — 17,000 rows a day of nothing. A daily connection
+summary says the same thing.
+
+**N12** · agreed — The dashboard stays **LAN-only** for now (**D8** deferred).
+Away from home, the notification and the Tractive app are the entire
+experience, which is why the notification body must carry the facts on its own.
 
 **N8** · agreed — A real login is a rare event, not a per-run cost. Code calls
 `session()`; `authenticate()` is reserved for genuine renewal (**C20**).
@@ -247,6 +405,86 @@ consequence follows from this: detection is ~8s behind reality, alerts will
 clear ~8s late, and any analysis that trusts a label at a phase boundary will
 put sprint speeds in the "standing still" bucket. **This is the floor on how
 "immediate" notification can ever be.**
+
+**C27** — **The enemy zone's edge is 30m from home**, so GPS scatter near the
+house crosses it. Nine of eleven apparent visits in a week were one or two
+fixes lasting under three minutes; only two were real. Any zone logic without
+dwell will manufacture phantom entries daily.
+
+**C28** — **The Tractive app claims every path on `applink.tractive.com`** but
+only routes the root; deeper paths open the app showing an error. The root is
+the tap target.
+
+**C33** — **`NOT_CHARGING` does not mean "off the charger".** A finished
+charge flips to `NOT_CHARGING` while still plugged in, so the field reads
+identically on a dock and on the cat — verified by unplugging and seeing no
+field change at all. Only the positive case is informative: `CHARGING` means
+she is definitely indoors, `NOT_CHARGING` means nothing.
+
+**C36** — **A stalled channel does not error.** The socket stays open and
+silent, so `fetch` never rejects and the loop never reconnects. Only the
+absence of keep-alives reveals it, which is why there is a sixty-second stall
+timeout. This is the failure that would leave a healthy-looking service seeing
+nothing.
+
+**C37** — **Absent fields arrive as `null`, not as missing keys.** The REST
+position report always carries a `speed` key; after live tracking has run it
+mirrors a live fix, which has no speed, and the value is an explicit `null`.
+Since `typeof null` is `'object'`, any "is it present?" check written as
+`!== undefined` passes and then fails on the type. Optional fields must be
+tested with `!= null`. Found by the e2e suite going red with
+`'object' !== 'number'`; it costs nothing at runtime because the detectors use
+speed derived from consecutive fixes, never the reported field.
+
+**C38** — **An unhandled throw in a request handler kills the monitor.** The
+HTTP handler is `async`, so nothing catches what it throws: `GET
+/export?from=abc` produced `RangeError: Invalid time value` from
+`new Date(NaN).toISOString()` and took the whole process down — verified
+live. Two lessons, both now enforced: query values that reach a `Date` must
+be validated (finite *and* within ±8.64e15, since `Number('9e99')` is finite
+and still throws; `Number(' ')` is 0, not NaN), and the handler needs a
+catch-all so no endpoint can ever end the process. A monitor that a mistyped
+URL can kill is not a monitor (**D5**).
+
+
+**C34** — **Charging transitions push promptly on the channel**, but only in
+the direction that actually happens. Reconnecting produced `→ charging` within
+seconds. Disconnecting a *full* tracker produced nothing, because no field
+changed. So "just unplugged" cannot be used as a trigger: it would work when
+the tracker was part-charged and be silent exactly when it wasn't — unreliable
+in the worst way, appearing to work until it doesn't.
+
+**C35** — Battery level is not a usable "in use" signal either. It takes about
+an hour to fall from 100% to 99%, while the sampler checks every three minutes
+regardless. It would be a worse signal arriving much later.
+
+**C30** — **The garden is inside Tractive's wifi home zone.** The tracker kept
+seeing home wifi from a garden table; `prioritized_zone` stayed `HOME` and
+`entered_at` never changed. Zone exit cannot signal that she is out.
+
+**C31** — **Distance from home cannot tell the house from the garden.** In the
+same test, indoors reported 8m from the home point and the garden reported 2m.
+At this property's scale the two are inside each other's noise, so no radius
+separates them. Only live-mode precision could, and that is the thing we are
+trying to decide when to enable.
+
+**C32** — **Normal mode reports roughly every ten minutes, in batches.** Eight
+minutes of a stationary tracker yielded two positions, delivered together. This
+is the latency floor for anything built on normal-mode data, regardless of how
+clever the trigger is.
+
+**C29** — ~~SIGTERM does not stop the service.~~ **Fixed.** Three bugs, each
+silent: the handler referenced a variable that no longer existed and threw on
+its first line; `fetch` has no timeout so turning live off could hang forever;
+and the handlers were registered *after* a top-level `for await` loop that
+never returns, so they were never registered. Now guarded by a hard deadline,
+a timeout on the live-off call, and destroying SSE clients that would otherwise
+hold `server.close()` open.
+
+**C26** — **Every position in a week of history came from GPS** — 6,403 of
+6,403, no cell or wifi fallback once. The `no-gps` detector has therefore never
+had an opportunity to fire, and its usefulness is unproven rather than
+established.
 
 **C25** — **Windowed signals keep alarming after the event ends.** Thrash is
 computed over a trailing 60s window, so replaying the walk showed it alarming
@@ -327,37 +565,46 @@ Target is the existing K3s home server, following the same GitOps pattern as
 `overlays/prod/topina/`, and ArgoCD syncing from git. Image published to GHCR,
 with Argo CD Image Updater bumping semver tags on GitHub release.
 
-**D1** · agreed — **The token cache must survive restarts.** This is the single
+**D1** · **done** — **The token cache must survive restarts.** This is the single
 most important deployment constraint and it is not obvious. Without persistence
 every pod restart is a real login, and a crash-looping pod would hammer the auth
 endpoint and lock the account out of the API entirely (**C20**) — taking the
 monitoring down in a way that a restart cannot fix. Needs a PVC, and the cache
 path must be configurable rather than the working directory.
 
-**D2** · agreed — Back off on auth failure. Pair with **D1**: persistence stops
+**D2** · **done** — Back off on auth failure (30s → 2m → 10m → 30m, capped). Pair with **D1**: persistence stops
 the common case, backoff stops the pathological one.
 
-**D3** · agreed — `TRACTIVE_PASSWORD` goes in a Kubernetes Secret, never in a
-manifest. `showgrab` keeps its config as plain env in the deployment, which is
+**D3** · **done** — `TRACTIVE_PASSWORD` goes in a Kubernetes Secret, never in a
+manifest. So does the FCM service-account key. `showgrab` keeps its config as plain env in the deployment, which is
 fine for a feed URL and not for a credential.
 
-**D4** · agreed — **Single replica.** Two pods would hold two channels and
+**D4** · **done** — **Single replica.** Two pods would hold two channels and
 fight over live tracking, each turning it off under the other.
 
-**D5** · provisional — A health endpoint whose meaning is *the channel is
+**D5** · **done** — A health endpoint whose meaning is *the channel is
 connected and events are arriving*, not merely that the process is alive. A
 monitor that has silently stopped monitoring is the failure worth catching, and
 process liveness would not catch it.
 
-**D6** · agreed — `enableServiceLinks: false`. Kubernetes injects
+**D6** · **done** — `enableServiceLinks: false`. Kubernetes injects
 `<SERVICE_NAME>_PORT` env vars for every Service in the namespace; `showgrab`
 crash-looped on exactly this when the injected variable collided with its own.
 Our variables are `TRACTIVE_*` and `PET_NAME` so a `topina` Service would not
 collide today, but the failure is silent enough to be worth pre-empting.
 
-**D7** · open — Whether recordings (**F4**) are written in production at all. A
-PVC keeps the tuning corpus growing; the alternative is recording only during
-deliberate sessions. They contain coordinates either way (**G3**).
+**D7** · **decided — off.** `RECORD_DIR` is unset in production, so no raw log
+is kept there; recordings are made deliberately with `npm run record`. Writing
+them without a volume behind it would fill the container's writable layer and
+lose them on restart anyway. Revisit if the tuning corpus needs to grow
+passively.
+
+**D8** · resolved — Reaching the dashboard from outside the LAN. Answered by
+Tailscale rather than by an ingress: the Service is published to the tailnet
+with `tailscale serve --tcp 8100`, so the phone reaches it from anywhere
+without the page ever being public (**N3**). Funnel stays off deliberately —
+there is still no authentication and the page shows her live location. No
+ingress, no certificate, no port forward on the router.
 
 ---
 
@@ -398,14 +645,50 @@ mandatory, now for a better reason: the field is both intermittent and wrong.
 39 of 39 fixes (max 1). It carried `9` on the stale REST report, so it means
 something during acquisition, but it is not a usable live quality gate.
 
-**Q15** — Is the sprint threshold right? It is set at 2.5 m/s, and the fastest
-reading in the walk recording was **2.49** — a jogging human came within a
-hundredth of tripping it. Either the threshold is too low for a cat's ordinary
-trot, or smoothing is flattening real peaks. Needs her own data.
+**Q16** — ~~What is her normal territory?~~ **Answered, and the answer
+invalidated the threshold.** Over a week (6,403 positions): p50 **14m**, p95
+47m, p99 62m, all-time max **142m**. The 150m threshold **could never fire** —
+it was dead code. Her range has a hard edge: 60m catches 89 fixes, 70m catches
+5. Now set to 80m. `npm run territory [days]`.
 
-**Q16** — What is her normal territory? `far-from-home` uses a flat 150m radius
-because no baseline exists. Pulling 30-90 days of history would turn it into
-"unusual *for her*" rather than an arbitrary circle.
+**Q17** — ~~Is the sprint threshold right?~~ (was **Q15**) **Answered with her
+own data.** From 5,866 dense fixes: median 0.19 m/s, p99 1.49, p99.9 3.89, max
+**9.38**. The 2.5 guess would have fired 16 times a week. Swept by distinct
+events per week — 2.0→19, 2.5→16, 3.0→9, 3.5→6, 4.0→5, 5.0→2 — and set to
+**3.0**, erring toward noticing. Still unknown whether any of those nine events
+was actual danger; that needs an incident we can identify.
+
+**Q19** — ~~Do zone crossings arrive as channel events?~~ **Answered: no, not
+usefully.** Eight minutes with the tracker on a garden table produced six
+status messages and **two** distinct positions, all in one burst. The home zone
+stayed `HOME` throughout with `entered_at` unchanged — the tracker saw home
+wifi from the garden, so there is no crossing to detect (**C30**). Distance
+from home was *inverted*: 8m indoors, 2m in the garden (**C31**). And normal
+mode reports roughly every ten minutes, which is a floor no trigger can beat
+(**C32**).
+
+**Q21** — Does a **tight geofence around the house** fire promptly on crossing?
+The garden falls outside such a fence even though it is inside the wifi home
+zone, and the enemy fence already carries `IN_TO_OUT`/`OUT_TO_IN` triggers, so
+the mechanism exists. If the device evaluates fences locally and reports
+crossings immediately — as an escape alert would have to — it beats the
+ten-minute cadence and the cheap trigger survives. If not, the trigger has to
+be bought with battery. **This is now the deciding question.**
+
+~~**Q19 original**~~ — The home zone and
+the enemy geofence both carry `IN_TO_OUT`/`OUT_TO_IN` triggers, and the tracker
+records `prioritized_zone_entered_at`. If crossings are pushed, "she is out"
+costs nothing and arrives promptly. If not, the fallback is distance-from-home
+on low-resolution fixes, which is slower and less certain. **This decides how
+much of the outing lifecycle is easy, and it is cheap to test.**
+
+**Q20** — How fast does live tracking actually drain the battery? Unmeasured.
+One full outing answers it.
+
+**Q18** — She is never outside at night. Fixes more than 30m from home cluster
+at 08:00 (24%), 12:00 (41%), 13:00 (17%) and 16:00 (10%), and are effectively
+zero from 19:00 to 07:00. Should monitoring simply be idle overnight, and does
+that change what live tracking costs?
 
 **Q14** — What does the noise floor look like under cover — beneath a car, in a
 hedge, behind a shed? **Q2** measured open sky in a garden. Degraded conditions

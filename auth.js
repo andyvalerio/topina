@@ -56,10 +56,34 @@ export async function authenticate({ email, password }) {
     return { token: data.access_token, userId: data.user_id, expiresAt: data.expires_at };
 }
 
-const CACHE_FILE = '.token.json';
+/**
+ * Where the token is kept. Configurable because in a container the working
+ * directory is not persistent: without a volume behind this, every restart is
+ * a real login and a crash-loop would lock the account out of the API
+ * entirely (**C20**, **D1**).
+ */
+const CACHE_FILE = process.env.TOKEN_CACHE_PATH || '.token.json';
 
 /** Try to renew this long before expiry rather than racing the deadline. */
 export const REFRESH_MARGIN_S = 3600;
+
+/** How long to wait after a failed login before trying again. */
+export const BACKOFF_MS = [30_000, 120_000, 600_000, 1_800_000];
+
+/**
+ * How long to wait before the next login attempt.
+ *
+ * The auth endpoint locks out for tens of minutes and sends no `Retry-After`,
+ * so retrying briskly turns a transient failure into a long outage. Steps back
+ * quickly and caps out at half an hour.
+ *
+ * @param {number} failures consecutive failures so far
+ * @returns {number} milliseconds
+ */
+export function backoffFor(failures) {
+    if (failures <= 0) return 0;
+    return BACKOFF_MS[Math.min(failures, BACKOFF_MS.length) - 1];
+}
 
 /**
  * Whether a cached token should be renewed.
@@ -100,15 +124,28 @@ export function isUsable(token, now = Date.now() / 1000) {
  * @param {{email: string, password: string}} credentials
  * @returns {Promise<{token: string, userId: string, expiresAt: number}>}
  */
+let failures = 0;
+let nextAttemptMs = 0;
+
 export async function session(credentials) {
     const cached = await readCache();
     if (!needsRenewal(cached)) return cached;
 
+    if (Date.now() < nextAttemptMs) {
+        if (isUsable(cached)) return cached;
+        const wait = Math.ceil((nextAttemptMs - Date.now()) / 1000);
+        throw new Error(`auth backing off for another ${wait}s after ${failures} failures`);
+    }
+
     try {
         const fresh = await authenticate(credentials);
         await writeFile(CACHE_FILE, JSON.stringify(fresh), { mode: 0o600 });
+        failures = 0;
         return fresh;
     } catch (err) {
+        failures += 1;
+        nextAttemptMs = Date.now() + backoffFor(failures);
+
         if (isUsable(cached)) {
             console.warn(`could not renew token (${err.message}); using the cached one`);
             return cached;

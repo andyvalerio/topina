@@ -9,10 +9,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createWindow, computeSignals, speedBetween, staleness, thrashRatio } from '../../signals.js';
+import { HOME, offset } from '../fixtures/place.js';
 
 /** ~0.00001 degrees of latitude is about 1.1m. */
 const at = (metresNorth, time) => ({
-    latlong: [57.761 + metresNorth * 0.000009, 12.0646],
+    latlong: offset(HOME, metresNorth, 0),
     time,
 });
 
@@ -40,8 +41,11 @@ test('walking in a line barely thrashes', () => {
 });
 
 test('back-and-forth movement thrashes hard', () => {
-    // Covers ground, arrives nowhere — the shape of a scuffle.
-    const fixes = [at(0, 100), at(10, 104), at(0, 108), at(10, 112), at(1, 116)];
+    // Covers ground, arrives nowhere — the shape of a scuffle. The last fix
+    // is 1.5m from the first, not 1.0m: thrashRatio returns null below a
+    // metre of net displacement, and a fixture sitting exactly on that
+    // threshold passes or fails on rounding rather than on behaviour.
+    const fixes = [at(0, 100), at(10, 104), at(0, 108), at(10, 112), at(1.5, 116)];
 
     const ratio = thrashRatio(fixes);
     assert.ok(ratio > 3, `expected a high ratio, got ${ratio}`);
@@ -68,8 +72,10 @@ test('a long stationary window does not read as thrashing', () => {
 });
 
 test('thrash reports once movement clears the noise floor', () => {
-    // Same back-and-forth, but at walking pace rather than jitter.
-    const fixes = [at(0, 100), at(8, 104), at(0, 108), at(8, 112), at(1, 116)];
+    // Same back-and-forth, but at walking pace rather than jitter. 1.5m of
+    // net displacement rather than 1.0 for the same reason as above: at
+    // exactly a metre the result turns on rounding, not on behaviour.
+    const fixes = [at(0, 100), at(8, 104), at(0, 108), at(8, 112), at(1.5, 116)];
 
     assert.ok(thrashRatio(fixes) > 2, 'real movement going nowhere should score');
 });
@@ -124,7 +130,7 @@ test('signals combine into one reading', () => {
     const signals = computeSignals({
         fix: window.at(-1),
         window,
-        home: [57.761, 12.0646],
+        home: HOME,
         lastArrivalMs: 1_000_000_000_000,
         nowMs: 1_000_000_000_000,
     });
@@ -132,5 +138,8 @@ test('signals combine into one reading', () => {
     assert.ok(Math.abs(signals.speed - 1) < 0.1, 'about 1 m/s');
     assert.ok(Math.abs(signals.moved - 4.4) < 0.6, 'about 4m between fixes');
     assert.equal(signals.interval, 4);
-    assert.ok(signals.fromHome > 8, 'walked away from home');
+    // The last fix is 8m north of home. Asserted as "about 8m" rather than
+    // "more than 8m": the fixture sits exactly on that value, so a strict
+    // comparison tests floating-point rounding instead of the signal.
+    assert.ok(Math.abs(signals.fromHome - 8) < 0.5, 'walked away from home');
 });

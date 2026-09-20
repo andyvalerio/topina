@@ -42,19 +42,45 @@ then do thresholds become real instead of guessed.
 
 ## Plan
 
-| # | Step | Done when | What it could kill |
-|---|---|---|---|
-| ✅ 1 | Auth + identify | Token comes back; the tracker ID prints | Creds/API don't work → nothing else matters |
-| ✅ 2 | One-shot position | A real lat/long prints | REST works but data's useless/stale |
-| ✅ 3 | Channel connect | Raw NDJSON lines stream to stdout | No push feed → fall back to polling |
-| ✅ 4 | Log to file | Events land in `.jsonl`; stationary noise-floor test done | Noise floor too high → movement heuristics dead |
-| ✅ 5 | Derived signals in terminal | speed / thrash / staleness printing live | Signals too noisy to read |
-| ✅ 6 | Strip-chart dashboard | Browser shows live traces | — |
-| ✅ 7 | Detectors | Detectors fire on real incidents | — |
-| 8 | Notifications | Phone buzzes | — |
-| 9 | Deploy to the Beelink | Running in K3s via ArgoCD | — |
+Phase one answered *can this work at all*. It did: the noise floor is sub-metre,
+the channel is a usable live feed, detectors fire on real movement, and an
+alert reaches a phone. All of it is below under "what each step told us".
 
-Steps 1-3 are one evening. Everything past 4 depends on what the data looks like.
+Phase two is a different question — **can it run unattended for weeks and be
+worth trusting**. The shape it has to take:
+
+> Sit on the channel permanently. When she leaves, verify by going live, and
+> stay live for the whole outing. Tell me she is out. Watch for trouble, more
+> closely inside the enemy's territory. Record everything worth keeping. Let me
+> change any of it from the dashboard, and survive a reboot.
+
+| # | Step | Done when |
+|---|---|---|
+| ✅ 1 | **Zone-exit signal** | Answered: **no usable signal**. Garden is inside the wifi home zone; distance is inverted; normal mode is ~10 min behind |
+| ✅ 2 | **How to know she is out** | A fresh GPS fix during a live sample. Indoors produces none — the limitation turned out to be the signal |
+| ✅ 3 | **Outing state machine** | `outing.js`, pure and tested; drives live tracking from `server.js` |
+| ✅ 4 | **Clean shutdown** | SIGTERM stops the service *and* turns live tracking off |
+| ✅ 5 | **Persistence** | SQLite on disk: settings, state, events — surviving restarts |
+| ✅ 6 | **Dashboard controls** | Every threshold visible, editable, toggleable; manual live hold with a countdown |
+| ✅ 7 | **Enemy zone** | Read from the Tractive API, applied as a risk modifier with a dwell requirement |
+| ✅ 8 | **Notification tiers** | Out / back / battery / elevated / alarm, each feeling different |
+| ✅ 9 | **Incidents + export** | Incidents as objects; download any time window for offline analysis |
+| ✅ 10 | **Watchdog** | Silence from the service is itself noticed |
+| 11 | **Deploy to the Beelink** | Running in K3s via ArgoCD, with a volume |
+| 12 | **Security review before pushing** | Everything committed-but-unpushed has been reviewed and is safe to make public |
+
+Step 12 is not a formality. This repository is public, the work has touched
+credentials, a service-account key, a cat's home coordinates and a live
+location feed, and commits have accumulated locally. Nothing goes up until
+someone has looked at the whole diff with that in mind.
+
+Step 1 is done and the answer was no, which is why step 2 exists at all.
+
+**What step 1 found.** Eight minutes with the tracker on a garden table
+produced two positions. The home zone never changed — the tracker sees home
+wifi from the garden. Distance from home was inverted: 8m indoors, 2m in the
+garden. And normal mode reports about every ten minutes regardless. So there is
+no free signal that she has gone out, and the design cannot assume one.
 
 ## What step 1 told us
 
@@ -281,15 +307,116 @@ Two things that matter more than they look:
 has silently stopped monitoring is the failure worth catching, and process
 liveness would not catch it.
 
+## Knowing the monitor is alive
+
+The worst failure in this system is silent. The service dies, no alerts
+arrive, and that is indistinguishable from a quiet afternoon — you would not
+find out until the day it mattered.
+
+Two guards, at different levels:
+
+**The channel stalls quietly.** Keep-alives arrive every five seconds, but a
+socket can stay open and silent indefinitely without `fetch` ever erroring. If
+none arrives for sixty seconds the connection is torn down and remade. Without
+this the service would look healthy while seeing nothing.
+
+**One notification a day**, at a configurable hour, saying it is watching and
+how the tracker is. If it does not arrive, something is wrong. It costs one
+message a day and needs nothing outside the system to run it.
+
+```
+Watching Topina
+tracker on charge · battery 100%
+```
+
+A fixed hour rather than every-24-hours on purpose: its absence should be
+noticeable at a time you are awake, not drifting into the night.
+
+## Incidents
+
+A finding belongs to one reading and vanishes with it. That is fine for
+deciding whether to buzz a phone and useless afterwards — you cannot review a
+finding, cannot say "that one was real", and cannot tune thresholds against
+four hundred thousand fixes.
+
+So an incident opens when something confirms, stretches while anything stays
+active, and closes after two quiet minutes, keeping what it peaked at and
+whether it happened in the rival's garden. They survive a restart, so a crash
+mid-incident does not lose the thing worth looking at.
+
+The dashboard lists them with two buttons: **real** and **nothing**. That is
+the whole labelling interface, deliberately — the analysis happens outside,
+with the exported data, and a workbench built into the dashboard would be a lot
+of work for a tool with one user.
+
+Labels are what eventually turn the thresholds from provisional into measured.
+Right now nine sprint events a week fire and nobody knows whether any was
+danger.
+
+## Export
+
+Pick a window, download `.jsonl`, hand it to Claude and look at it together.
+
+**Everything is in one store.** Every fix is written with its position, its
+derived signals, the verdict, the phase, the zone and the battery — alongside
+the phase changes, holds, notifications and zone crossings. An export that held
+only the decisions and not the evidence would be the wrong half of the picture.
+
+```json
+{"time":1789921736,"latlong":[57.76,12.06],"accuracy":0,"sensor":"GPS",
+ "speed":null,"thrash":null,"fromHome":12.9,"zone":null,
+ "level":"calm","findings":[],"phase":"off-hours","battery":100}
+```
+
+Raw fixes are pruned after `retentionDays` (30 by default). Incidents are never
+pruned — they are scarce and they are the part worth keeping.
+
+```bash
+curl 'localhost:8080/export?from=<ms>&to=<ms>' -o window.jsonl
+```
+
+The dashboard has a date-range picker with "last hour" and "today" shortcuts.
+
+## Notifications
+
+Away from home the notification and the Tractive app are the whole experience,
+so the body stands alone and a tap opens Tractive on her live map — they built
+a map, we should not build another.
+
+No coordinates: a latitude and longitude tell you nothing at a glance, and a
+distance from home does. It also keeps them out of the notification shade of a
+phone that might be handed around or screenshotted.
+
+```
+[INFO ] Topina is out
+        live tracking on · 62m from home
+[ALARM] Can't see Topina
+        no fixes arriving — last seen · 62m from home
+[ALARM] Topina bolted in the danger zone
+        4.20 m/s · 62m from home
+[ALARM] Topina's tracker is at 20%
+        charge it soon, tracking will stop
+```
+
+Three tiers. `info` for going out and coming back, `warn` for elevated findings
+and battery steps, `alarm` for anything urgent — only the last arrives at
+Android high priority. If "she is out" landed with the same weight as "sprint
+in the enemy's garden" you would learn to ignore both, and an ignored alert
+costs the same attention as a useful one while buying nothing.
+
+The coordinates are in the body deliberately. Tapping through shows where she
+is *now*, which for "went quiet four minutes ago" is not what the alert was
+about.
+
 ## Detectors
 
 | finding | level | threshold | basis |
 |---|---|---|---|
-| `sprint` | alarm | 2.5 m/s | provisional — cat sprint is 3-8 m/s |
+| `sprint` | alarm | 3.0 m/s | **her own data**: p99 1.49, max 9.38 |
 | `thrash` | alarm | ratio 4, while moving | measured: 1.3 walking a line, 5.7-8.8 confined |
 | `silence` | alarm | 90s | provisional — ~20 missed fixes |
 | `no-gps` | elevated | sensor ≠ GPS | under a car or shed |
-| `far-from-home` | alarm → elevated | 150m | provisional, no territory baseline yet |
+| `far-from-home` | elevated | 80m | **her own data**: p99 62m, max 142m |
 
 A condition must hold for two consecutive readings before it escalates, so one
 noisy fix cannot raise an alarm. Clearing is immediate — being slow to notice
@@ -334,6 +461,211 @@ the shape a real scuffle should have.
 Staleness runs on its own timer rather than off the event stream, since the
 thing it measures is the *absence* of events: nothing arriving means nothing
 would otherwise recalculate.
+
+## Knowing the monitor is alive
+
+The worst failure in this system is silent. The service dies, no alerts
+arrive, and that is indistinguishable from a quiet afternoon — you would not
+find out until the day it mattered.
+
+Two guards, at different levels:
+
+**The channel stalls quietly.** Keep-alives arrive every five seconds, but a
+socket can stay open and silent indefinitely without `fetch` ever erroring. If
+none arrives for sixty seconds the connection is torn down and remade. Without
+this the service would look healthy while seeing nothing.
+
+**One notification a day**, at a configurable hour, saying it is watching and
+how the tracker is. If it does not arrive, something is wrong. It costs one
+message a day and needs nothing outside the system to run it.
+
+```
+Watching Topina
+tracker on charge · battery 100%
+```
+
+A fixed hour rather than every-24-hours on purpose: its absence should be
+noticeable at a time you are awake, not drifting into the night.
+
+## Incidents
+
+A finding belongs to one reading and vanishes with it. That is fine for
+deciding whether to buzz a phone and useless afterwards — you cannot review a
+finding, cannot say "that one was real", and cannot tune thresholds against
+four hundred thousand fixes.
+
+So an incident opens when something confirms, stretches while anything stays
+active, and closes after two quiet minutes, keeping what it peaked at and
+whether it happened in the rival's garden. They survive a restart, so a crash
+mid-incident does not lose the thing worth looking at.
+
+The dashboard lists them with two buttons: **real** and **nothing**. That is
+the whole labelling interface, deliberately — the analysis happens outside,
+with the exported data, and a workbench built into the dashboard would be a lot
+of work for a tool with one user.
+
+Labels are what eventually turn the thresholds from provisional into measured.
+Right now nine sprint events a week fire and nobody knows whether any was
+danger.
+
+## Export
+
+Pick a window, download `.jsonl`, hand it to Claude and look at it together.
+
+**Everything is in one store.** Every fix is written with its position, its
+derived signals, the verdict, the phase, the zone and the battery — alongside
+the phase changes, holds, notifications and zone crossings. An export that held
+only the decisions and not the evidence would be the wrong half of the picture.
+
+```json
+{"time":1789921736,"latlong":[57.76,12.06],"accuracy":0,"sensor":"GPS",
+ "speed":null,"thrash":null,"fromHome":12.9,"zone":null,
+ "level":"calm","findings":[],"phase":"off-hours","battery":100}
+```
+
+Raw fixes are pruned after `retentionDays` (30 by default). Incidents are never
+pruned — they are scarce and they are the part worth keeping.
+
+```bash
+curl 'localhost:8080/export?from=<ms>&to=<ms>' -o window.jsonl
+```
+
+The dashboard has a date-range picker with "last hour" and "today" shortcuts.
+
+## Notifications
+
+An Android app in [app/](app/) receives pushes over FCM. It is a receiver and
+nothing else: the service decides what is worth knowing, the app only makes
+sure the phone buzzes. It shows its FCM device token to be copied into the
+service's `.env`, and keeps a log of what arrived so a missed alert can be
+checked against what was sent.
+
+There is no communication back to the service. For one phone and one cat,
+pasting a token once is simpler and more robust than device registration,
+discovery, and a server the handset can reach.
+
+```bash
+cd app && flutter build apk --release
+adb install app/build/app/outputs/flutter-apk/app-release.apk
+npm run notify:test      # prove the chain works without waiting for trouble
+```
+
+Sending uses no SDK — one RS256-signed JWT exchanged for an access token, then
+one POST — so the project stays at zero runtime dependencies. Alerts fire when
+a finding **appears** and then go quiet for five minutes even if it keeps
+firing: detectors run every four seconds, and a dozen buzzes per incident
+trains you to ignore the phone. An ignored alert is worse than none, since it
+costs the same attention and buys nothing.
+
+Needs `FCM_TOKEN` (from the app) and a service-account key at
+`.fcm-service-account.json`. Both gitignored; in production the key is a
+Kubernetes Secret (**D3**).
+
+## Knowing when she is out
+
+```
+charging                → she is indoors. no command sent at all.
+outside 07:00-17:00     → nothing. she is never out at night.
+otherwise, every 3 min  → live on for 30s. a fresh fix means she is outside.
+while out               → live stays on, re-armed as the device drops it.
+fixes stop near home    → she came in.
+fixes stop far from home→ signal lost. stay live, say so.
+```
+
+The discriminator is not geometry. **Indoors, live tracking produces no fresh
+fixes** — 55 seconds of it yielded only the same stale position re-sent, while
+outdoors it produces one every four seconds. That was recorded as a limitation
+before it turned out to be the answer.
+
+Distance from home earns its place in exactly one job: when fixes stop, telling
+a homecoming from a lost signal. It cannot separate the house from the garden
+(8m indoors versus 2m in the garden), so it is used for nothing else.
+
+Re-arming needs no special path: every tick asks for live, the snapshot says
+whether it is on, and a lapse is simply asked for again.
+
+## Controls
+
+The dashboard carries a live-tracking panel and a settings table. Every
+threshold, interval and detector is editable there, and each row shows where
+its value came from — `default`, `env` or `dashboard` — so a setting that
+ignores its environment variable explains itself.
+
+Each detector has its own on/off switch. Silencing one should be a deliberate,
+visible act rather than shoving its threshold out of reach, where the reason
+gets lost.
+
+The manual hold shows what it is holding and **how long is left** —
+`held OFF — reverts to auto in 12 min`. A hold that expires silently is
+confusing: you turned something off for a reason and twenty minutes later it is
+back on with no explanation.
+
+## Settings and state
+
+SQLite on disk via `node:sqlite`, so still no dependencies. Settings are seeded
+once from defaults and the environment; after that the **stored value wins**,
+following the pattern already used by `showgrab`. Because that surprises people
+later — editing an environment variable then does nothing — every setting
+records where its value came from, so the dashboard can say so.
+
+```bash
+curl localhost:8080/settings                                   # values and sources
+curl -X POST 'localhost:8080/settings?key=sampleIntervalS&value=120'
+curl 'localhost:8080/events?from=<ms>&to=<ms>'                 # export a window
+```
+
+The outing state and any manual hold are stored too. A service restarted
+mid-outing comes back still knowing she is outside — without that it would
+quietly stop watching her and say nothing.
+
+### Shutting down
+
+`SIGTERM` stops the service and turns live tracking off. That matters because
+Kubernetes stops a pod with SIGTERM on every restart, and getting it wrong
+leaves the tracker draining.
+
+Three separate bugs had to be fixed for this to work at all: the handler
+referenced a variable that no longer existed and threw on its first line;
+`fetch` has no timeout, so turning live off could hang forever; and the
+handlers were registered *after* a top-level `for await` loop that never
+returns, so they were never registered at all.
+
+## Deployment
+
+Manifests in [deploy/](deploy/) — a kustomize base for K3s, following the same
+pattern as the other apps on the home server. Image published to GHCR on
+release; Argo CD Image Updater picks up new semver tags.
+
+The load-bearing detail is the `/config` volume holding the token cache.
+Without it, every pod restart is a real login — and since the auth endpoint
+locks out for tens of minutes, a crash-loop would lock the account out of the
+API entirely, taking the monitor down in a way a restart cannot fix.
+
+See [deploy/README.md](deploy/README.md) for the two secrets and why the
+liveness probe is deliberately slack.
+
+## What is normal for her
+
+`npm run territory [days]` pulls her position history and reports where she
+actually goes. Run against a week — 6,403 positions — it replaced two invented
+thresholds with measured ones:
+
+| | |
+|---|---|
+| distance from home | p50 **14m** · p95 47m · p99 62m · max **142m** |
+| her own speed | p50 0.19 m/s · p99 1.49 · p99.9 3.89 · max **9.38** |
+| sensor | 100% GPS, not one cell or wifi fallback |
+| when she is out | 08:00, 12:00-13:00, 16:00 — effectively never 19:00-07:00 |
+
+Two corrections fell out of that:
+
+- **`far-from-home` at 150m was dead code.** She has never been that far. Her
+  range has a hard edge — 60m catches 89 fixes, 70m catches 5 — so her world
+  ends around 65m. Now 80m.
+- **`sprint` at 2.5 m/s would have fired sixteen times a week.** Swept by
+  distinct events per week: 2.0→19, 2.5→16, 3.0→9, 3.5→6, 4.0→5, 5.0→2. Now
+  3.0, erring toward noticing. Whether any of those nine was real danger is
+  still unknown.
 
 ## Authentication
 

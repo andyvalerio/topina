@@ -38,6 +38,11 @@ export const getTracker = (token, trackerId) => get(token, `tracker/${trackerId}
 
 export const getHardware = (token, trackerId) => get(token, `device_hw_report/${trackerId}`);
 
+/** Geofence stubs for a tracker; the detail call has the geometry. */
+export const getGeofences = (token, trackerId) => get(token, `tracker/${trackerId}/geofences`);
+
+export const getGeofence = (token, fenceId) => get(token, `geofence/${fenceId}`);
+
 /**
  * Latest position report. Unlike a channel fix this carries `speed` and names
  * accuracy `pos_uncertainty` (**C12**), and it can be many minutes stale.

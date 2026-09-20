@@ -5,9 +5,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { centroid, distance } from '../../geo.js';
+import { HOME, offset } from '../fixtures/place.js';
 
 test('a point is zero metres from itself', () => {
-    assert.equal(distance([57.761, 12.0646], [57.761, 12.0646]), 0);
+    assert.equal(distance(HOME, [...HOME]), 0);
 });
 
 test('one degree of latitude is about 111km', () => {
@@ -17,15 +18,15 @@ test('one degree of latitude is about 111km', () => {
 });
 
 test('distance is symmetric', () => {
-    const a = [57.761, 12.0646];
-    const b = [57.7615, 12.0652];
+    const a = HOME;
+    const b = offset(HOME, 55, 35);
 
     assert.equal(distance(a, b), distance(b, a));
 });
 
 test('distance resolves the metre scale we actually care about', () => {
     // ~0.00001 degrees of latitude is a bit over a metre; GPS noise lives here.
-    const metres = distance([57.761, 12.0646], [57.76101, 12.0646]);
+    const metres = distance(HOME, offset(HOME, 1.1, 0));
 
     assert.ok(metres > 0.5 && metres < 2, `expected ~1m, got ${metres}`);
 });
@@ -35,5 +36,5 @@ test('centroid averages the points', () => {
 });
 
 test('centroid of a single point is that point', () => {
-    assert.deepEqual(centroid([[57.761, 12.0646]]), [57.761, 12.0646]);
+    assert.deepEqual(centroid([HOME]), HOME);
 });

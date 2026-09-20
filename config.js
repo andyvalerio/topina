@@ -12,6 +12,8 @@ const {
     TRACTIVE_TRACKER_ID,
     TRACTIVE_USER_ID,
     PET_NAME,
+    FCM_TOKEN,
+    FCM_SERVICE_ACCOUNT,
 } = process.env;
 
 export const credentials = {
@@ -25,6 +27,12 @@ export const userId = TRACTIVE_USER_ID;
 
 /** Falls back to something neutral so logs read sensibly on a fresh checkout. */
 export const petName = PET_NAME || 'the cat';
+
+/** Push notifications are optional: without both of these the service runs silently. */
+export const fcm = {
+    deviceToken: FCM_TOKEN,
+    keyPath: FCM_SERVICE_ACCOUNT || '.fcm-service-account.json',
+};
 
 /**
  * Why the given env vars can't be used, or false when they're all present.

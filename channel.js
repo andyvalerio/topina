@@ -16,6 +16,15 @@ const CHANNEL_URL = 'https://channel.tractive.com/3/channel';
 export const HEARTBEAT_MESSAGES = new Set(['keep-alive', 'handshake']);
 
 /**
+ * Keep-alives arrive every five seconds. If none has for this long the
+ * connection is dead even though `fetch` has not errored — a socket can stay
+ * open and silent indefinitely. That failure is the dangerous one: the service
+ * looks healthy and sees nothing, which is indistinguishable from a calm
+ * afternoon.
+ */
+export const STALL_TIMEOUT_MS = 60_000;
+
+/**
  * Open the channel and yield every event the server sends, heartbeats
  * included — callers decide what to ignore.
  *
@@ -53,7 +62,26 @@ export async function* listen(credentials, { signal } = {}) {
             throw new Error(`channel failed: HTTP ${response.status}`);
         }
 
-        yield* readLines(response.body, signal);
+        // Abort this connection if it goes quiet, so the loop reconnects.
+        const stall = new AbortController();
+        let timer = null;
+        const resetStallTimer = () => {
+            clearTimeout(timer);
+            timer = setTimeout(() => stall.abort(), STALL_TIMEOUT_MS);
+            timer.unref?.();
+        };
+        resetStallTimer();
+
+        try {
+            yield* readLines(response.body, signal, stall, resetStallTimer);
+        } catch (err) {
+            if (signal?.aborted) return;
+            // A stall is expected and simply means: go round again.
+            if (stall.signal.aborted) console.error('channel stalled — reconnecting');
+            else throw err;
+        } finally {
+            clearTimeout(timer);
+        }
     }
 }
 
@@ -67,12 +95,14 @@ export async function* listen(credentials, { signal } = {}) {
  * @param {AbortSignal} [signal]
  * @returns {AsyncGenerator<object>}
  */
-async function* readLines(body, signal) {
+async function* readLines(body, signal, stall, onData) {
     const decoder = new TextDecoder();
     let buffer = '';
 
     for await (const chunk of body) {
         if (signal?.aborted) return;
+        if (stall?.signal.aborted) throw new Error('stalled');
+        onData?.();
         buffer += decoder.decode(chunk, { stream: true });
 
         const lines = buffer.split('\n');
