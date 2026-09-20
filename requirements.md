@@ -95,13 +95,21 @@ depends on what the data shows.
 **F9** · agreed — A web dashboard showing derived signals **live**, as
 time-series traces. This is the primary surface. Its purpose in the early steps
 is diagnostic: to let us watch the numbers and the cat simultaneously and learn
-what distress looks like.
+what distress looks like. *Implemented: `server.js` + `dashboard.html`, SSE, no
+dependencies and no build step.*
 
 **F10** · agreed — The map is secondary context, not the centrepiece. The
 official app already does maps.
 
-**F11** · provisional — Current values displayed prominently alongside the
-traces: speed, thrash, staleness, battery, accuracy, sensor type.
+**F11** · agreed — Current values displayed prominently alongside the traces:
+speed, thrash, staleness, distance from home, sensor, battery. *Implemented.*
+
+**F19** · agreed — Charts use **fixed** scales with bands drawn from measured
+data. Auto-scaling — the default in every charting library — would zoom into a
+calm cat's noise until it looked dramatic.
+
+**F20** · agreed — A gap in the data is drawn as a **break in the line**, never
+interpolated across. Silence is the signal we most want to see.
 
 ### Detection
 
@@ -120,7 +128,13 @@ guesses. **Unblocked, with measured reference points** from a guided walk
 Still never exceeds 0.23 m/s; walking runs 0.95 m/s median — **4.2x
 separation**. A "moving" threshold around 0.4 m/s separates cleanly. A cat
 sprint is 3-8 m/s, far above anything measured here, so a sprint detector has
-ample headroom. Real incident data is still needed for the upper bounds.
+ample headroom. Real incident data is still needed for the upper bounds. *Implemented in
+`detectors.js`; thresholds in one `DEFAULTS` object so a change is one line and
+can be re-evaluated against the whole corpus by replay.*
+
+**F21** · agreed — A condition must hold for `sustain` consecutive readings
+before it escalates, so one noisy fix cannot raise an alarm. Clearing is
+immediate: being slow to notice trouble is worse than being quick to relax.
 
 **F13** · open — Detector tuning is expected to be iterative and ongoing. The
 system must make it cheap to change a threshold and re-evaluate it against the
@@ -233,6 +247,14 @@ consequence follows from this: detection is ~8s behind reality, alerts will
 clear ~8s late, and any analysis that trusts a label at a phase boundary will
 put sprint speeds in the "standing still" bucket. **This is the floor on how
 "immediate" notification can ever be.**
+
+**C25** — **Windowed signals keep alarming after the event ends.** Thrash is
+computed over a trailing 60s window, so replaying the walk showed it alarming
+through a full minute of standing perfectly still — the window still remembered
+the jogging. Any alarm built on a windowed signal must also require the
+condition to be true *now*; thrash additionally requires current speed above
+`moving`. Without that, an alert cannot be trusted to mean "happening", only
+"happened recently".
 
 **C24** — **Thrash ratio is only meaningful while actually moving.** A
 stationary tracker's sub-metre jitter accumulates path length while going
@@ -375,6 +397,15 @@ mandatory, now for a better reason: the field is both intermittent and wrong.
 **Answered: no, not in live mode.** Once the fix settles, `accuracy` is `0` for
 39 of 39 fixes (max 1). It carried `9` on the stale REST report, so it means
 something during acquisition, but it is not a usable live quality gate.
+
+**Q15** — Is the sprint threshold right? It is set at 2.5 m/s, and the fastest
+reading in the walk recording was **2.49** — a jogging human came within a
+hundredth of tripping it. Either the threshold is too low for a cat's ordinary
+trot, or smoothing is flattening real peaks. Needs her own data.
+
+**Q16** — What is her normal territory? `far-from-home` uses a flat 150m radius
+because no baseline exists. Pulling 30-90 days of history would turn it into
+"unusual *for her*" rather than an arbitrary circle.
 
 **Q14** — What does the noise floor look like under cover — beneath a car, in a
 hedge, behind a shed? **Q2** measured open sky in a garden. Degraded conditions

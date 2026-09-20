@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Topina</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --line: #232a34;
+    --text: #e6edf3; --dim: #7d8590;
+    --calm: #3fb950; --elevated: #d29922; --alarm: #f85149;
+    --speed: #58a6ff; --thrash: #bc8cff; --stale: #f0883e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 16px;
+    padding: 14px 20px; border-bottom: 1px solid var(--line);
+  }
+  h1 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: .02em; }
+  #status {
+    margin-left: auto; padding: 4px 12px; border-radius: 999px;
+    font-weight: 600; text-transform: uppercase; letter-spacing: .08em; font-size: 12px;
+  }
+  .calm     { background: #12261a; color: var(--calm); }
+  .elevated { background: #2b2411; color: var(--elevated); }
+  .alarm    { background: #2d1416; color: var(--alarm); }
+  #findings { padding: 0 20px; min-height: 26px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .finding { padding: 3px 10px; border-radius: 4px; font-size: 12px; }
+  .finding.alarm { background: #2d1416; color: var(--alarm); }
+  .finding.elevated { background: #2b2411; color: var(--elevated); }
+  .finding.pending { background: var(--panel); color: var(--dim); }
+  #tiles { display: flex; gap: 10px; padding: 10px 20px; flex-wrap: wrap; }
+  .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; min-width: 104px; }
+  .tile .k { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+  .tile .v { font-size: 22px; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .charts { padding: 0 20px 20px; display: grid; gap: 10px; }
+  .chart { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px 4px; }
+  .chart h2 { margin: 0 0 4px; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
+  canvas { width: 100%; height: 120px; display: block; }
+  footer { padding: 0 20px 20px; color: var(--dim); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="name">—</h1>
+  <span id="meta" style="color:var(--dim)"></span>
+  <span id="status" class="calm">calm</span>
+</header>
+<div id="findings"></div>
+<div id="tiles"></div>
+<div class="charts">
+  <div class="chart"><h2>speed — m/s</h2><canvas id="c-speed"></canvas></div>
+  <div class="chart"><h2>thrash — path ÷ displacement</h2><canvas id="c-thrash"></canvas></div>
+  <div class="chart"><h2>silence — seconds since data</h2><canvas id="c-stale"></canvas></div>
+</div>
+<footer id="foot"></footer>
+
+<script>
+const WINDOW_MS = 5 * 60 * 1000;
+const frames = [];
+
+// Fixed scales, with bands from the measured walk. Auto-scaling would zoom
+// into a calm cat's noise until it looked dramatic.
+const CHARTS = {
+  speed: {
+    canvas: 'c-speed', colour: getComputedStyle(document.documentElement).getPropertyValue('--speed'),
+    max: 4, pick: f => f.signals?.speed,
+    bands: [
+      { from: 0,    to: 0.23, label: 'still',    fill: '#1b2b1f' },
+      { from: 0.69, to: 1.27, label: 'walking',  fill: '#18222e' },
+      { from: 2.5,  to: 4,    label: 'sprint',   fill: '#2d1416' },
+    ],
+  },
+  thrash: {
+    canvas: 'c-thrash', colour: getComputedStyle(document.documentElement).getPropertyValue('--thrash'),
+    max: 12, pick: f => f.signals?.thrash,
+    bands: [ { from: 4, to: 12, label: 'alarm', fill: '#2d1416' } ],
+  },
+  stale: {
+    canvas: 'c-stale', colour: getComputedStyle(document.documentElement).getPropertyValue('--stale'),
+    max: 180, pick: f => f.signals?.staleness,
+    bands: [ { from: 90, to: 180, label: 'alarm', fill: '#2d1416' } ],
+  },
+};
+
+function draw(spec) {
+  const canvas = document.getElementById(spec.canvas);
+  const ratio = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * ratio; canvas.height = h * ratio;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(ratio, ratio);
+  ctx.clearRect(0, 0, w, h);
+
+  const now = Date.now();
+  const y = v => h - (Math.min(v, spec.max) / spec.max) * h;
+
+  for (const band of spec.bands) {
+    ctx.fillStyle = band.fill;
+    ctx.fillRect(0, y(band.to), w, y(band.from) - y(band.to));
+    ctx.fillStyle = '#7d8590'; ctx.font = '10px ui-monospace, monospace';
+    ctx.fillText(band.label, 4, y(band.to) + 11);
+  }
+
+  ctx.strokeStyle = '#232a34'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, h - 0.5); ctx.lineTo(w, h - 0.5); ctx.stroke();
+
+  ctx.strokeStyle = spec.colour.trim(); ctx.lineWidth = 1.6;
+  ctx.beginPath();
+  let drawing = false;
+  for (const frame of frames) {
+    const value = spec.pick(frame);
+    const x = w - ((now - frame.receivedMs) / WINDOW_MS) * w;
+    if (x < 0) continue;
+    // A gap in the data is a break in the line, never interpolated across:
+    // silence is the signal we most want to see.
+    if (value === null || value === undefined) { drawing = false; continue; }
+    if (drawing) ctx.lineTo(x, y(value)); else { ctx.moveTo(x, y(value)); drawing = true; }
+  }
+  ctx.stroke();
+
+  ctx.fillStyle = '#7d8590'; ctx.font = '10px ui-monospace, monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText(String(spec.max), w - 4, 11);
+  ctx.textAlign = 'left';
+}
+
+const fmt = (v, p = 2) => (v === null || v === undefined ? '—' : Number(v).toFixed(p));
+
+function render() {
+  const cutoff = Date.now() - WINDOW_MS;
+  while (frames.length && frames[0].receivedMs < cutoff) frames.shift();
+
+  const last = frames.at(-1);
+  if (last) {
+    document.getElementById('name').textContent = last.petName ?? 'tracker';
+    const status = document.getElementById('status');
+    status.textContent = last.level ?? 'calm';
+    status.className = last.level ?? 'calm';
+
+    document.getElementById('findings').innerHTML =
+      [...(last.findings ?? []).map(f => `<span class="finding ${f.level}">${f.code}: ${f.detail}</span>`),
+       ...(last.pending ?? []).map(f => `<span class="finding pending">${f.code}? (confirming)</span>`)
+      ].join('') || '<span style="color:var(--dim);font-size:12px">nothing of note</span>';
+
+    const s = last.signals ?? {};
+    document.getElementById('tiles').innerHTML = [
+      ['speed', fmt(s.speed) + ' m/s'],
+      ['thrash', fmt(s.thrash, 1)],
+      ['silence', fmt(s.staleness, 0) + 's'],
+      ['from home', s.fromHome == null ? '—' : fmt(s.fromHome, 0) + 'm'],
+      ['sensor', s.sensor ?? '—'],
+      ['battery', last.battery == null ? '—' : last.battery + '%'],
+    ].map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
+
+    document.getElementById('meta').textContent = last.phase ? `phase: ${last.phase}` : '';
+    document.getElementById('foot').textContent =
+      `${frames.length} frames · last data ${fmt(s.staleness, 0)}s ago · window 5 min`;
+  }
+
+  for (const spec of Object.values(CHARTS)) draw(spec);
+}
+
+const stream = new EventSource('/events');
+stream.onmessage = (e) => {
+  const payload = JSON.parse(e.data);
+  if (payload.type === 'history') frames.push(...payload.frames);
+  else frames.push(payload);
+};
+
+setInterval(render, 250);
+render();
+addEventListener('resize', render);
+</script>
+</body>
+</html>

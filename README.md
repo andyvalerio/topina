@@ -49,8 +49,8 @@ then do thresholds become real instead of guessed.
 | ✅ 3 | Channel connect | Raw NDJSON lines stream to stdout | No push feed → fall back to polling |
 | ✅ 4 | Log to file | Events land in `.jsonl`; stationary noise-floor test done | Noise floor too high → movement heuristics dead |
 | ✅ 5 | Derived signals in terminal | speed / thrash / staleness printing live | Signals too noisy to read |
-| 6 | Strip-chart dashboard | Browser shows live traces | — |
-| 7 | Thresholds from observed data | Detectors fire on real incidents | — |
+| ✅ 6 | Strip-chart dashboard | Browser shows live traces | — |
+| ✅ 7 | Detectors | Detectors fire on real incidents | — |
 | 8 | Notifications | Phone buzzes | — |
 | 9 | Deploy to the Beelink | Running in K3s via ArgoCD | — |
 
@@ -253,6 +253,52 @@ continuous signal, altitude delta (fence/wall/tree), time-of-day banding.
    pet or tracker IDs, no coordinates or addresses. It comes from the
    environment via [config.js](config.js); only `.env.example` is committed.
    Scrub probe output before pasting it anywhere.
+
+## The dashboard
+
+```bash
+npm start                                      # live
+npm start -- --no-live                         # live, without touching the device
+npm start -- --replay data/<file>.jsonl --pace 1
+```
+
+Then open `http://localhost:8080`. One process serves the page and holds the
+channel; no dependencies, no build step.
+
+Three stacked traces over five minutes — **speed**, **thrash**, **silence** —
+with current values, active findings, and a calm/elevated/alarm banner.
+
+Two things that matter more than they look:
+
+- **Fixed scales with measured bands.** Auto-scaling is every charting
+  library's default and would zoom into a calm cat's noise until it looked
+  dramatic. The speed axis is pinned, with bands drawn from the walk: still
+  below 0.23, walking 0.69-1.27, sprint above 2.5.
+- **Gaps stay gaps.** When data stops the line breaks rather than
+  interpolating across. Silence is the signal we most want to see.
+
+`/health` reports healthy only while data is actually arriving — a monitor that
+has silently stopped monitoring is the failure worth catching, and process
+liveness would not catch it.
+
+## Detectors
+
+| finding | level | threshold | basis |
+|---|---|---|---|
+| `sprint` | alarm | 2.5 m/s | provisional — cat sprint is 3-8 m/s |
+| `thrash` | alarm | ratio 4, while moving | measured: 1.3 walking a line, 5.7-8.8 confined |
+| `silence` | alarm | 90s | provisional — ~20 missed fixes |
+| `no-gps` | elevated | sensor ≠ GPS | under a car or shed |
+| `far-from-home` | alarm → elevated | 150m | provisional, no territory baseline yet |
+
+A condition must hold for two consecutive readings before it escalates, so one
+noisy fix cannot raise an alarm. Clearing is immediate — being slow to notice
+trouble is worse than being quick to relax.
+
+Replayed against the measured walk, the detectors read **calm** through
+standing still and both walking paces, and **alarm** through every fast-burst
+reading. That is the whole of the tuning evidence so far: no cat in trouble has
+ever been recorded, so every threshold is provisional.
 
 ## Watching the signals
 
