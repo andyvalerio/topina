@@ -60,6 +60,23 @@ export const DEFAULTS = {
     /** Consecutive fixes a condition must hold before it escalates. */
     sustain: 2,
 
+    /**
+     * Net movement over the last minute below which a sprint is not believed.
+     *
+     * Over the charging hour of 2026-09-21 a stationary tracker produced an
+     * 11.54 m/s \u201csprint\u201d while its centre moved 4.2m. Running at that speed
+     * and staying put is not something a cat can do.
+     *
+     * Against her real week this takes the sprint count from 10 readings to 3.
+     * The ones it drops had net displacements of 0.6-4.6m, so the \u201cnine
+     * sprints a week\u201d that `sprint: 3.0` was tuned against was itself mostly
+     * bad fixes — which means that threshold is now looser than it was
+     * measured to be, and is due a re-sweep against gated data.
+     */
+    gateDisplacementM: 7,
+
+    displacementGateEnabled: true,
+
     // Each detector can be switched off from the dashboard. A detector that
     // is crying wolf should be silenced deliberately rather than by quietly
     // pushing its threshold out of reach, where the reason is lost.
@@ -78,6 +95,8 @@ export const DESCRIBED = {
     silenceS: 'Seconds with no data at all before raising the alarm. At the four-second live cadence this is about twenty missed fixes.',
     farFromHomeM: 'Distance from home that counts as unusual for her. Her p99 is 62m and she has never exceeded 142m.',
     sustain: 'How many consecutive readings a condition must hold before it escalates. Stops one noisy fix raising an alarm.',
+    gateDisplacementM: 'How far she must actually have got over the last minute for a sprint reading to be believed. A tracker sitting still invents speed out of bad fixes: on the charger it produced 11.54 m/s while its centre moved 4.2m. Thrash is not gated on this - a fight goes nowhere by definition.',
+    displacementGateEnabled: 'Whether the sprint detector is gated on her having actually gone somewhere. Off, a single bad fix can raise a sprint alarm again.',
     sprintEnabled: 'Whether the sprint detector runs at all.',
     thrashEnabled: 'Whether the thrash detector runs at all.',
     silenceEnabled: 'Whether the silence detector runs at all.',
@@ -107,7 +126,30 @@ export function findings(signals, thresholds = DEFAULTS) {
         });
     }
 
-    if (thresholds.sprintEnabled && signals.speed !== null && signals.speed >= thresholds.sprint) {
+    // A sprint that goes nowhere is arithmetically impossible: 3 m/s held
+    // for any part of a minute puts real distance behind her. When the
+    // displacement says otherwise, the speed came from a bad fix — the
+    // charging hour produced an 11.54 m/s reading whose centre moved 4.2m.
+    //
+    // `null` — too few fixes to answer — blocks it too, which is the opposite
+    // of the usual instinct that an unanswered question must never silence an
+    // alarm. That reading came off a window of three fixes. Speed and the
+    // window are derived from the same handful of positions: too few to say
+    // where she got to is too few to believe how fast she got there. The cost
+    // is bounded at roughly the first twenty seconds of each live session.
+    //
+    // Thrash is deliberately **not** gated this way. Two cats fighting in one
+    // spot is the signal this project exists to catch, and it goes nowhere by
+    // definition — suppressing findings that go nowhere would blind it to its
+    // own subject. A stationary tracker is kept from reaching the detectors at
+    // all by the docked latch in outing.js instead (**C41**).
+    const wentSomewhere =
+        !thresholds.displacementGateEnabled ||
+        (signals.displacementM !== null &&
+            signals.displacementM !== undefined &&
+            signals.displacementM >= thresholds.gateDisplacementM);
+
+    if (thresholds.sprintEnabled && wentSomewhere && signals.speed !== null && signals.speed >= thresholds.sprint) {
         found.push({
             code: 'sprint',
             level: 'alarm',

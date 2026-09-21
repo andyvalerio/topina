@@ -13,6 +13,7 @@
  * uses ours.
  */
 import { distance } from './geo.js';
+import { centreDisplacement } from './displacement.js';
 
 /** How much trailing history the windowed signals look at. */
 export const WINDOW_S = 60;
@@ -138,6 +139,12 @@ export function computeSignals({ fix, window, home, lastArrivalMs, nowMs }) {
         moved: previous ? distance(previous.latlong, fix.latlong) : null,
         interval: previous ? fix.time - previous.time : null,
         thrash: thrashRatio(window),
+        // How far she actually got over the window, as opposed to how much
+        // path she accumulated. The two diverge wildly when the tracker is
+        // sitting still: one measured hour on the charger accumulated 390m of
+        // path while its centre never moved more than 6.5m. The detectors
+        // gate on this so that noise cannot raise an alarm (**C41**).
+        displacementM: centreDisplacement(window),
         staleness: staleness(lastArrivalMs, nowMs),
         fromHome: home ? distance(home, fix.latlong) : null,
         accuracy: fix.accuracy,

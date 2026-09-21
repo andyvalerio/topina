@@ -37,7 +37,7 @@ export const dayKey = (date) =>
 export const message = ({ petName, battery, phase, incidentsToday }) => ({
     title: `Watching ${petName}`,
     body: [
-        phase === 'charging' ? 'tracker on charge' : `tracker ${phase}`,
+        phase === 'docked' ? 'tracker on its charger' : `tracker ${phase}`,
         battery === null ? null : `battery ${battery}%`,
         incidentsToday ? `${incidentsToday} incident${incidentsToday === 1 ? '' : 's'} yesterday` : null,
     ]

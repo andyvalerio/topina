@@ -45,9 +45,9 @@ test('the message says what it is watching and how the tracker is', () => {
     assert.equal(m.tier, 'info', 'proof of life is not an alarm');
 });
 
-test('a charging tracker is described as such', () => {
-    assert.match(message({ petName: 'Cat', battery: 100, phase: 'charging', incidentsToday: 0 }).body,
-                 /on charge/);
+test('a docked tracker is described as such', () => {
+    assert.match(message({ petName: 'Cat', battery: 100, phase: 'docked', incidentsToday: 0 }).body,
+                 /on its charger/);
 });
 
 test('yesterday incidents are mentioned when there were any', () => {

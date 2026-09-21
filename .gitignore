@@ -4,6 +4,11 @@ node_modules/
 .fcm-service-account.json
 *.jsonl
 data/
+
+# The one recording that has to be in git: an hour of the tracker sitting on
+# its charger while the service reported an outing. It is the only known-bad
+# case we have, and the tests that stop it recurring are worthless without it.
+!tests/fixtures/*.jsonl
 app/android/app/google-services.json
 app/build/
 app/.dart_tool/

@@ -57,7 +57,7 @@ worth trusting**. The shape it has to take:
 | # | Step | Done when |
 |---|---|---|
 | ✅ 1 | **Zone-exit signal** | Answered: **no usable signal**. Garden is inside the wifi home zone; distance is inverted; normal mode is ~10 min behind |
-| ✅ 2 | **How to know she is out** | A fresh GPS fix during a live sample. Indoors produces none — the limitation turned out to be the signal |
+| ⚠️ 2 | **How to know she is out** | ~~A fresh GPS fix during a live sample~~ — **wrong, corrected 2026-09-21.** A docked tracker produces them by the hundred. Now: a docked latch and retraction on stillness, with a fresh fix as evidence rather than proof |
 | ✅ 3 | **Outing state machine** | `outing.js`, pure and tested; drives live tracking from `server.js` |
 | ✅ 4 | **Clean shutdown** | SIGTERM stops the service *and* turns live tracking off |
 | ✅ 5 | **Persistence** | SQLite on disk: settings, state, events — surviving restarts |
@@ -193,6 +193,12 @@ tracking with the cat inside yielded **zero** new fixes — just the same stale
 position re-sent. GPS can't see sky through a roof. Harmless for the product,
 but it means every cadence and noise-floor measurement has to be taken
 **outdoors**, including step 4's stationary test (**C17**).
+
+> **Withdrawn, 2026-09-21.** This held for 55 seconds in one spot and was then
+> built on as though it were general. It is not: an hour of the tracker on its
+> charging dock produced **747 fresh GPS fixes, four seconds apart, indoors**.
+> The measurement advice above stands; the inference drawn from it in step 2
+> does not. See **C41** and "The morning it watched a charger" below.
 
 **Repeated positions carry an identical `time`.** Deduplicate on it, or each
 repeat becomes a zero-distance, zero-elapsed fix and divides by zero in the
@@ -564,22 +570,91 @@ Kubernetes Secret (**D3**).
 ## Knowing when she is out
 
 ```
-charging                → she is indoors. no command sent at all.
+on the dock             → she is indoors. no command sent, no fix judged.
 outside 07:00-17:00     → nothing. she is never out at night.
-otherwise, every 3 min  → live on for 30s. a fresh fix means she is outside.
+otherwise, every 3 min  → live on for 30s. a fresh fix suggests she is outside.
 while out               → live stays on, re-armed as the device drops it.
+30 min going nowhere    → near home, that was not an outing. retract it.
 fixes stop near home    → she came in.
 fixes stop far from home→ signal lost. stay live, say so.
 ```
 
-The discriminator is not geometry. **Indoors, live tracking produces no fresh
-fixes** — 55 seconds of it yielded only the same stale position re-sent, while
-outdoors it produces one every four seconds. That was recorded as a limitation
-before it turned out to be the answer.
+**There is no positive test for "she is outside", and this originally shipped
+believing there was.** A fresh fix during a sample was taken as proof, on the
+strength of 55 seconds of indoor live tracking that produced none. An hour of
+the tracker sitting on its charger produced 747 of them (see below), and the
+service called it an outing.
+
+Nothing positional replaces it. Measured against a week of her own fixes, a
+resting cat in the garden and a docked tracker are indistinguishable: her
+median centre displacement over a minute is 2.7m against the charger's 1.2m,
+the charger's scatter is *tighter* than hers, and 59% of her entire week falls
+within 10m of where the charger sits — the garden is 12m from the house and her
+whole territory is about 60m across.
+
+So the system rules outings *out* rather than in. Two mechanisms do that work:
+
+**The docked latch.** `charging_state` is not the question; "is it on the dock"
+is. The charger stops charging at 100% and reverts to `NOT_CHARGING`, so the
+old check went blind exactly when the tracker had been docked longest. The
+latch closes on the first sight of charging and opens only on proof of movement
+— 20m inside a minute, or 15m across half an hour. While it is closed, no fix
+is judged at all: the detectors never see a tracker that is not on her.
+
+**Retraction on stillness.** An outing used to end only on silence, so a
+stationary tracker emitting fixes stayed "out" indefinitely. Half an hour whose
+median centre moves less than 7m, within the home radius, now ends it and says
+so. Deliberately limited to near home: out in the field, stillness is at least
+as likely to mean something has gone wrong as to mean she is not there.
 
 Distance from home earns its place in exactly one job: when fixes stop, telling
 a homecoming from a lost signal. It cannot separate the house from the garden
 (8m indoors versus 2m in the garden), so it is used for nothing else.
+
+### The morning it watched a charger
+
+2026-09-21, 07:00 to 08:00. The tracker never left its dock. What the service
+did with that hour, and what each part of it cost:
+
+| | |
+|---|---|
+| 07:00:00 | window opens, `off-hours → sampling` |
+| 07:00:10 | fresh fix → **"she is out"**, live tracking pinned on |
+| 07:16:42 | manual hold, live off — someone can see she is indoors |
+| 07:21:25 | hold cleared, and **10 seconds later it declared the same outing again** |
+| 08:12 | still `out`, still live, battery 100% → 96% on the charger |
+
+747 fixes, 530 distinct positions, **390m of accumulated path**, wander to 62m
+from home, one single-fix jump of 49.5m, and three alarms — an 11.54 m/s
+"sprint" whose centre moved 4.2m, and two thrash findings. Every number in that
+sentence came from a device sitting still.
+
+The hour is committed as `tests/fixtures/docked-hour.jsonl` and replayed by
+`tests/unit/docked-hour.test.js`. It is the only known-bad case this project
+has; it cannot be regenerated, and the tests that stop this recurring are
+worthless without it.
+
+Three things it taught, beyond the fix itself:
+
+- **Path length lies and displacement does not** — but only computed robustly.
+  Endpoint-to-endpoint displacement peaked at 52m on this hour, off that one
+  outlier. Comparing the median of each half of the window instead never
+  exceeded 6.5m (**C41**).
+- **Thrash must not be gated on displacement.** A fight is two cats going
+  nowhere hard. Suppressing findings that go nowhere would blind the detector
+  to the thing this project exists for, so the tracker is kept away from the
+  detectors instead of the detectors being weakened.
+- **The `sprint: 3.0` threshold is now looser than it was measured to be.** It
+  was swept against nine sprints a week in her history; gating on displacement
+  leaves three of those standing, so most of what it was tuned against was bad
+  fixes. Due a re-sweep.
+
+And one that is about the system rather than the cat: **turning live off while
+the service insists she is out is a correction, and it used to be discarded.**
+It is now recorded as a `false-positive` event with the evidence as it stood,
+because it is the only ground truth this project gets about its own false
+positives — a week of her movement contains no known-bad case, and this is how
+that corpus starts.
 
 Re-arming needs no special path: every tick asks for live, the snapshot says
 whether it is on, and a lapse is simply asked for again.
@@ -617,6 +692,35 @@ curl 'localhost:8080/events?from=<ms>&to=<ms>'                 # export a window
 The outing state and any manual hold are stored too. A service restarted
 mid-outing comes back still knowing she is outside — without that it would
 quietly stop watching her and say nothing.
+
+Every number the docked latch and the stillness retraction depend on is a
+setting, including the two **window lengths**, which are the ones that change
+behaviour most:
+
+| setting | default | what moving it does |
+|---|---|---|
+| `stillnessWindowS` | 1800 | Both the basis of "not out after all" and the patience before saying so. Shorter reacts faster and risks writing off a long sit |
+| `reactionWindowS` | 60 | How quickly the tracker leaving its charger is noticed. Shorter is faster but noisier |
+| `departureM` | 15 | Movement over the long window that opens the latch |
+| `reactionDepartureM` | 20 | The same over the short one. Higher, because a minute is a noisier basis than thirty |
+| `stillM` | 7 | Movement over the long window below which this was not an outing |
+| `stillnessRetractEnabled` | true | Off restores the old behaviour, where only silence could end an outing |
+| `gateDisplacementM` | 7 | Ground she must have covered for a sprint to be believed |
+| `displacementGateEnabled` | true | Off lets a single bad fix raise a sprint again |
+
+Both windows resize under a running service — the tick applies the configured
+span before reading it, so an edit takes effect on the next reading rather
+than at the next restart. Shortening one drops the history that no longer fits
+immediately, because a tracker that has gone quiet might not send another fix
+for minutes and a stale answer over the old span is the one thing a shortened
+window must not give.
+
+Two numbers are deliberately **not** settings. `MIN_FIXES` is six because the
+median of each half is what makes displacement robust to a wild fix, and a
+half of fewer than three has no median worth the name — it is the floor the
+method imposes, not a preference. `WINDOW_S` in `signals.js` stays fixed
+because the thrash ratio is derived from it, and moving a detector as a side
+effect of changing an outing setting is how you get a surprise a month later.
 
 ### Shutting down
 

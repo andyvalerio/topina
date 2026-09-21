@@ -232,16 +232,27 @@ function render() {
     document.getElementById('tiles').innerHTML = [
       ['speed', fmt(s.speed) + ' m/s'],
       ['thrash', fmt(s.thrash, 1)],
+      // Path length and speed both read a stationary tracker as moving; this
+      // is the one that does not, so it belongs next to them rather than
+      // buried. 390m of path and 6m of this is a tracker going nowhere.
+      ['got anywhere', s.displacementM == null ? '—' : fmt(s.displacementM, 1) + 'm/min'],
       ['silence', fmt(s.staleness, 0) + 's'],
       ['from home', s.fromHome == null ? '—' : fmt(s.fromHome, 0) + 'm'],
       ['sensor', s.sensor ?? '—'],
       ['battery', last.battery == null ? '—' : last.battery + '%'],
+      // The blind spot that let a docked tracker be reported as out for a
+      // morning: charging stops at 100% and the state reads NOT_CHARGING.
+      // Showing both means that can be seen rather than deduced.
+      ['charge', last.chargingState == null ? '—'
+        : (last.chargingState === 'CHARGING' ? 'charging' : (last.batteryState ?? 'not charging').toLowerCase())],
+      ['half-hour drift', last.stillnessM == null ? '—' : fmt(last.stillnessM, 1) + 'm'],
     ].map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 
     document.getElementById('meta').textContent = last.phase ? `phase: ${last.phase}` : '';
 
     if (last.outing) {
-      document.getElementById('phase').textContent = last.outing.phase;
+      document.getElementById('phase').textContent =
+        last.docked ? `${last.outing.phase} (on its charger)` : last.outing.phase;
       document.getElementById('livestate').textContent = last.live ? '· tracker is live' : '· tracker idle';
     }
     // A UI that cannot act must say so, or it looks exactly like one that can.

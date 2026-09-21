@@ -23,6 +23,7 @@ export const TRACTIVE_APP = 'https://applink.tractive.com/';
 export const TIERS = {
     out: 'info',
     home: 'info',
+    still: 'info',
     'signal-back': 'info',
     battery: 'warn',
     'signal-lost': 'alarm',
@@ -58,6 +59,7 @@ export function forOuting(kind, context) {
     const titles = {
         out: `${petName} is out`,
         home: `${petName} is back`,
+        still: `${petName} is not out after all`,
         'signal-lost': `Can't see ${petName}`,
         'signal-back': `${petName} is back in view`,
         'zone-entered': `${petName} is in ${context.zone ?? 'the danger zone'}`,
@@ -66,6 +68,9 @@ export function forOuting(kind, context) {
     const bodies = {
         out: 'live tracking on',
         home: 'live tracking off',
+        // Says what was decided and why, because this one retracts something
+        // already announced. Without the reason it reads as a malfunction.
+        still: 'nothing has moved for half an hour near home — live tracking off',
         // The one case where the last known position is the whole point.
         'signal-lost': 'no fixes arriving — last seen',
         'signal-back': 'fixes resumed',

@@ -1,22 +1,56 @@
 /**
  * Knowing whether she is out, and keeping live tracking on while she is.
  *
- * The signal is not geometry. Indoors, live mode produces **no fresh fixes** —
- * measured: 55 seconds of confirmed-active live tracking indoors yielded only
- * the same stale position re-sent (**C17**). Outdoors it produces one every
- * four seconds. So *a fresh GPS fix during a sample means she is outside*, and
- * no radius or boundary is involved.
+ * ## The premise this was built on, and why it was wrong
  *
- * Distance from home is used for exactly one thing: when fixes stop, deciding
- * whether she walked back indoors or lost signal somewhere out there. Near
- * home means home. Far from home means trouble, and that is the moment worth
- * hearing about (**C31** is why it cannot be used for anything else).
+ * The original discriminator was that indoors, live mode produces **no fresh
+ * fixes** — measured once, over 55 seconds (**C17**). A fresh fix during a
+ * sample therefore meant she was outside, and no radius or boundary was
+ * involved.
+ *
+ * An hour of the tracker sitting on its charger on 2026-09-21 falsified that
+ * outright: **747 fresh GPS fixes, four seconds apart, indoors**, which the
+ * state machine read as an outing and held open for the whole hour. C17 was a
+ * single short observation, and it does not generalise (**C41**).
+ *
+ * Worse, nothing position-shaped replaces it. Against a week of her own fixes,
+ * a resting cat in the garden and a tracker on its dock are the same reading:
+ * her median centre displacement over a minute is 2.7m against the charger's
+ * 1.2m, and the charger's fix scatter is *tighter* than hers. Displacement can
+ * refute an outing but cannot establish one (**C42**, and see displacement.js
+ * for the numbers).
+ *
+ * ## What holds the line instead
+ *
+ * Two things, neither of which is a positive test for being outside:
+ *
+ * 1. **A sticky docked latch.** `charging_state` is not the question — "is it
+ *    on the dock" is. The charger stops charging at 100% and reports
+ *    `NOT_CHARGING`, so the old check went blind exactly when the tracker had
+ *    been docked longest. The latch instead closes on the first sight of
+ *    charging and opens only on proof of movement.
+ * 2. **Retraction on stillness.** An outing used to end only on *silence*, so
+ *    a stationary tracker emitting fixes stayed "out" forever. Half an hour of
+ *    going nowhere, near home, now ends it.
+ *
+ * Distance from home is still used for exactly one thing: when fixes stop,
+ * deciding whether she walked back indoors or lost signal somewhere out
+ * there. Near home means home. Far from home means trouble (**C31**).
  *
  * Pure: state and events in, next state and actions out. No timers, no
  * network, no clock of its own.
  */
 
-/** @typedef {'charging'|'off-hours'|'waiting'|'sampling'|'out'|'signal-lost'} Phase */
+
+/** @typedef {'docked'|'off-hours'|'waiting'|'sampling'|'out'|'signal-lost'} Phase */
+
+import {
+    DEPARTURE_M,
+    REACTION_DEPARTURE_M,
+    REACTION_WINDOW_S,
+    STILL_M,
+    STILLNESS_WINDOW_S,
+} from './displacement.js';
 
 export const DEFAULTS = {
     /** Hours she could plausibly be outside. She is never out at night. */
@@ -34,6 +68,34 @@ export const DEFAULTS = {
 
     /** Only for telling "came home" from "lost signal out there". */
     homeRadiusM: 20,
+
+    /**
+     * Movement over half an hour that opens the docked latch. Measured: a
+     * charger-bound tracker never exceeded 3.5m over that span.
+     */
+    departureM: DEPARTURE_M,
+
+    /**
+     * Movement over one minute that opens the latch without waiting for the
+     * long window. Three times the measured 60-second stationary ceiling.
+     */
+    reactionDepartureM: REACTION_DEPARTURE_M,
+
+    /** Movement over half an hour below which an outing is not an outing. */
+    stillM: STILL_M,
+
+    /**
+     * The span `stillM` and `departureM` are judged over. The window length
+     * *is* the duration — below `stillM` across this window already means
+     * this long going nowhere, so there is no separate timer to keep in step
+     * with it.
+     */
+    stillnessWindowS: STILLNESS_WINDOW_S,
+
+    /** The span `reactionDepartureM` is judged over. */
+    reactionWindowS: REACTION_WINDOW_S,
+
+    stillnessRetractEnabled: true,
 
     /** Consecutive fixes inside a danger zone before it counts as being there. */
     dangerDwellFixes: 3,
@@ -66,6 +128,12 @@ export const DESCRIBED = {
     sampleDurationS: 'How long to hold live tracking on while waiting for a fix to prove she is outside. Nine seconds is usually enough.',
     quietS: 'How long without a fresh fix, while she is out, before deciding she went in or lost signal.',
     homeRadiusM: 'Used only when fixes stop: within this she came home, beyond it she lost signal outdoors.',
+    departureM: 'How far the tracker\u2019s centre must move over half an hour to count as having left the charger. Measured: on the charger it never moved more than 3.5m over that span.',
+    reactionDepartureM: 'The same proof, over one minute instead of thirty, so a real outing is not missed for half an hour. Higher because a minute is a noisier basis: the charger\u2019s one-minute ceiling was 6.5m.',
+    stillM: 'Movement over the long window below which she is treated as not out at all. Only applies within the home radius, so she is never written off while she is away from the house.',
+    stillnessWindowS: 'The span the long window covers, in seconds. It is both the basis of \u201cnot out after all\u201d and the patience before saying so - at 1800 it takes half an hour of going nowhere. Shorter reacts faster and risks writing off a cat having a long sit.',
+    reactionWindowS: 'The span the short window covers, in seconds. How quickly the tracker leaving its charger can be noticed. Shorter is faster but noisier, so it pairs with the higher threshold above.',
+    stillnessRetractEnabled: 'Whether half an hour of going nowhere near home ends an outing. Turning this off restores the old behaviour, where only silence could end one - which is how a tracker on its charger stayed \u201cout\u201d for an entire morning.',
     dangerDwellFixes: 'How many consecutive fixes inside a danger zone before it counts. The rival zone starts 30m from the house, so stray fixes cross its edge constantly.',
     dangerFactor: 'How much to tighten alarm thresholds while she is in a danger zone. 0.7 means a sprint alarms at 70% of the usual speed.',
     dangerZoneEnabled: 'Whether danger zones read from Tractive affect anything at all.',
@@ -76,23 +144,65 @@ export const DESCRIBED = {
 };
 
 /**
+ * Whether the tracker is on its dock, given where it was a moment ago.
+ *
+ * Sticky on purpose. `charging_state` goes to `NOT_CHARGING` the moment the
+ * battery reaches 100%, so a tracker that has sat on the dock all night reads
+ * exactly like one clipped to a cat. Latching on the first sight of charging
+ * and holding until something moves closes that hole: the only way off the
+ * dock is to physically leave it.
+ *
+ * `batteryFull` latches too, but **only from a cold start**. It is there for
+ * the case where the service boots onto an already-full docked tracker and so
+ * never witnesses the charging transition. Restricting it to `initial()`
+ * state means a full battery can never steal an outing already in progress —
+ * she often goes out on a full charge, and that must stay an outing.
+ *
+ * @param {{phase: Phase, docked: boolean, since: number}} state
+ * @param {{charging: boolean, batteryFull: boolean, movedM: number|null,
+ *          movedRecentlyM: number|null}} input
+ * @param {typeof DEFAULTS} config
+ * @returns {boolean}
+ */
+export function dockedNext(state, input, config = DEFAULTS) {
+    const { charging, batteryFull, movedM, movedRecentlyM } = input;
+
+    // Either window can prove movement. The short one is what keeps a real
+    // outing from going unnoticed for half an hour; the long one catches a
+    // slow drift the short one is too noisy to call.
+    const moved =
+        (movedRecentlyM !== null && movedRecentlyM >= config.reactionDepartureM) ||
+        (movedM !== null && movedM >= config.departureM);
+
+    if (charging) return true;
+    if (state.docked) return !moved;
+
+    const coldStart = state.phase === 'waiting' && state.since === 0;
+    return coldStart && batteryFull && !moved;
+}
+
+/**
  * Decide what to do next.
  *
  * @param {{phase: Phase, since: number, lastFreshFixMs: number|null,
- *          lastDistanceM: number|null}} state
- * @param {{nowMs: number, hour: number, charging: boolean,
- *          freshFix: boolean, distanceM: number|null, holdUntilMs: number,
- *          holdLive: boolean|null}} input
+ *          lastDistanceM: number|null, docked: boolean}} state
+ * @param {{nowMs: number, hour: number, charging: boolean, batteryFull: boolean,
+ *          freshFix: boolean, distanceM: number|null, movedM: number|null,
+ *          movedRecentlyM: number|null, stillnessSettled: boolean,
+ *          holdUntilMs: number, holdLive: boolean|null}} input
  * @param {typeof DEFAULTS} [config]
  * @returns {{phase: Phase, since: number, lastFreshFixMs: number|null,
- *           lastDistanceM: number|null, live: boolean, notify: string|null}}
+ *           lastDistanceM: number|null, docked: boolean, live: boolean,
+ *           notify: string|null}}
  */
 export function step(state, input, config = DEFAULTS) {
-    const { nowMs, hour, charging, freshFix, distanceM, holdUntilMs, holdLive } = input;
+    const { nowMs, hour, freshFix, distanceM, movedM, stillnessSettled, holdUntilMs, holdLive } =
+        input;
 
     const lastFreshFixMs = freshFix ? nowMs : state.lastFreshFixMs;
     const lastDistanceM = freshFix && distanceM !== null ? distanceM : state.lastDistanceM;
-    const base = { lastFreshFixMs, lastDistanceM };
+    const docked = dockedNext(state, input, config);
+    const base = { lastFreshFixMs, lastDistanceM, docked };
 
     const enter = (phase, notify = null) => ({
         ...base,
@@ -102,21 +212,43 @@ export function step(state, input, config = DEFAULTS) {
         notify,
     });
 
-    // A manual hold outranks everything, including the charging check: if
-    // someone asked for live, they get live (**L5**).
+    // A manual hold outranks everything, including the dock: if someone asked
+    // for live, they get live (**L5**).
     if (nowMs < holdUntilMs && holdLive !== null) {
         return { ...enter(holdLive ? 'out' : 'waiting'), live: holdLive };
     }
 
-    // Charging means the tracker is off her and indoors. Nothing to do, and
-    // no command worth sending.
-    if (charging) return enter('charging');
+    // On the dock means off her and indoors. Nothing to do, and no command
+    // worth sending — and, unlike the old charging check, this stays true
+    // once the battery fills up and charging stops.
+    if (docked) return enter('docked');
 
     if (hour < config.windowStartHour || hour >= config.windowEndHour) {
         return enter('off-hours');
     }
 
     const quietFor = lastFreshFixMs === null ? Infinity : nowMs - lastFreshFixMs;
+
+    // Half an hour of going nowhere, near home, is not an outing — whatever
+    // the fixes say. This is the check whose absence let a tracker on its
+    // charger stay "out" for a whole morning: the only previous way out of
+    // this phase was silence, and a stationary tracker is not silent.
+    //
+    // Deliberately limited to within the home radius. Out in the field,
+    // stillness is at least as likely to mean something has gone wrong as to
+    // mean she is not there, and writing off an outing is the one error this
+    // system must not make.
+    if (
+        state.phase === 'out' &&
+        config.stillnessRetractEnabled &&
+        stillnessSettled &&
+        movedM !== null &&
+        movedM < config.stillM &&
+        lastDistanceM !== null &&
+        lastDistanceM <= config.homeRadiusM
+    ) {
+        return enter('waiting', 'still');
+    }
 
     // Already out and still hearing from her: stay live, say nothing.
     if ((state.phase === 'out' || state.phase === 'signal-lost') && freshFix) {
@@ -139,7 +271,10 @@ export function step(state, input, config = DEFAULTS) {
     // the worst possible moment.
     if (state.phase === 'out') return enter('out');
 
-    // A fresh fix while sampling is the whole test: she is outside.
+    // A fresh fix while sampling is the best evidence available that she is
+    // outside — but it is no longer taken as proof on its own. It is reached
+    // only once the docked latch is open, which is what the 747 indoor fixes
+    // of 2026-09-21 would have failed to do.
     if (state.phase === 'sampling') {
         if (freshFix) return enter('out', 'out');
         if (nowMs - state.since >= config.sampleDurationS * 1000) return enter('waiting');
@@ -166,4 +301,5 @@ export const initial = () => ({
     since: 0,
     lastFreshFixMs: null,
     lastDistanceM: null,
+    docked: false,
 });

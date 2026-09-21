@@ -59,11 +59,19 @@ The core loop, and the thing every other behaviour hangs off.
 rate-limits per resource after roughly two calls and reports it as HTTP 200
 with an error body (**C7**).
 
-**L2** · **done** — **A fresh GPS fix during a live sample means she is out.**
-No geometry. Indoors, live tracking produces no fresh fixes at all — 55 seconds
-of confirmed-active live tracking yielded only the same stale position re-sent
-(**C17**); outdoors it produces one every four seconds. What was recorded as a
-limitation turned out to be the discriminator.
+**L2** · **revised 2026-09-21** — ~~A fresh GPS fix during a live sample means
+she is out.~~ It does not. That rested on C17, which has been withdrawn: a
+tracker on its charging dock produced 747 fresh fixes in an hour, indoors, and
+the state machine called it an outing and held it open all morning.
+
+Nothing positional replaces it — a resting cat in the garden and a docked
+tracker are the same reading (**C42**). What the system has instead is a fresh
+fix as the best available evidence, admitted only once two things say she is
+not indoors: the **docked latch** (**C40**), which is sticky because
+`charging_state` goes blind at a full battery, and **retraction on stillness**,
+which ends an outing after half an hour of going nowhere near home. Neither is
+a positive test. The honest statement of the requirement is that the system
+can rule an outing *out* with confidence and can only ever guess it *in*.
 
 Distance from home is used for exactly one thing: when fixes stop, telling
 "walked back indoors" from "lost signal out there" — near home means home, far
@@ -547,12 +555,58 @@ fields (often just `tracker_id`, `tracker_state` and the one control that
 moved). A consumer that replaces its state on each event silently loses
 position and hardware data. State must be *merged*.
 
-**C17** — **Indoors, live tracking produces no fixes.** Live mode was confirmed
-active (`active: true`, `remaining: 1794`) for ~55 seconds with the cat inside,
-and not one new position arrived — only the same stale fix re-sent. GPS can't
-see sky through a roof. Harmless for the product (the point is outdoor walks)
-but it means **every cadence and noise-floor measurement must be taken
-outdoors**, and the stationary test in step 4 has to be outdoors too.
+**C17** — ~~**Indoors, live tracking produces no fixes.**~~ **WITHDRAWN
+2026-09-21 — see C41.** Live mode was confirmed active (`active: true`,
+`remaining: 1794`) for ~55 seconds with the cat inside, and not one new
+position arrived — only the same stale fix re-sent. GPS can't see sky through
+a roof.
+
+That was one observation over 55 seconds, in one spot, and it does not
+generalise. An hour of the tracker on its charging dock produced **747 fresh
+GPS fixes four seconds apart**, indoors. The conclusion that survives is the
+narrow one it was originally drawn for: **cadence and noise-floor
+measurements must be taken outdoors**, because indoor fixes are multipath.
+The conclusion that does not survive is the one the outing detector was then
+built on — that a fresh fix means she is outside.
+
+**C40** — **`charging_state` goes blind at a full battery.** The dock stops
+charging at 100% and the tracker reverts to `NOT_CHARGING`, so a tracker that
+has sat on its charger all night is indistinguishable from one clipped to the
+cat by that field alone. `battery_state: FULL` is the only field left saying
+otherwise, and it is not proof either — she goes out on a full charge often.
+Any "is it on the dock" test must therefore be **sticky**: latched on the
+first sight of charging and released only by evidence of movement. The check
+it replaced failed precisely when the tracker had been docked longest.
+
+**C41** — **A stationary tracker indoors manufactures movement.** Measured
+over the charging hour of 2026-09-21: 747 fixes, **390m of accumulated path**,
+530 distinct positions, excursions to 62m from home and one single-fix jump of
+49.5m — from a device that never moved. It produced an 11.54 m/s "sprint" and
+two thrash findings. Path length, speed and the thrash ratio all read this as
+motion; only **net displacement** does not, and only when computed robustly
+(median of each half of the window, not endpoint to endpoint — the naive
+version peaked at 52m on the same data, the robust one at 6.5m).
+
+Two consequences. Thrash cannot be gated on displacement — a fight is two cats
+going nowhere hard, so that gate would blind the detector to its own subject.
+And the real defence is therefore not a better threshold but **not judging a
+tracker that is not on her at all**.
+
+**C42** — **Position cannot establish that she is outside.** Only refute it.
+Against a week of her own fixes, a resting cat in the garden and a tracker on
+its dock are the same reading: her median centre displacement over a minute is
+2.7m against the charger's 1.2m; only 1.7% of her genuinely-outdoor windows
+clear 15m; the charger's fix scatter (p50 0.57m) is *tighter* than hers (p50
+1.51m); and 59% of her entire week falls within 10m of where the charger sits,
+because the garden is 12m from the house and her whole territory is ~60m
+across. Longer windows separate them only weakly — at 30 minutes the dock
+never exceeded 3.5m against her median of 9.2m, which is a usable *retraction*
+test and nothing more.
+
+There is no positive test. What the system has instead is a set of signals for
+**definitely not out** — charging (C40), and half an hour of going nowhere
+near home — plus a fresh fix as the best available evidence once those are
+clear. This is a real limitation, not a threshold waiting to be tuned.
 
 **C18** — The same position is re-sent with an identical `time`. Consumers must
 deduplicate on `time`, or every repeat registers as a zero-distance,

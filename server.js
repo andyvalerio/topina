@@ -16,6 +16,7 @@ import { setLiveTracking } from './commands.js';
 import { getGeofence, getGeofences, getPet } from './rest.js';
 import { createTracker } from './state.js';
 import { computeSignals, createWindow, staleness } from './signals.js';
+import { createDisplacement } from './displacement.js';
 import { createDetector, DEFAULTS, DESCRIBED as DETECTOR_HELP } from './detectors.js';
 import { timeRange } from './query.js';
 import { DEFAULTS as OUTING, DESCRIBED as OUTING_HELP, initial, step } from './outing.js';
@@ -121,6 +122,35 @@ async function handle(req, res) {
         hold = { untilMs: Date.now() + minutes * 60_000, live: on };
         db.saveState('hold', hold);
         db.record('hold', hold);
+
+        // Turning live *off* while the service insists she is out is not a
+        // preference — it is a correction. Someone can see she is indoors and
+        // the monitor cannot. That is the only ground truth this system ever
+        // gets about its own false positives, and it used to be thrown away:
+        // on 2026-09-21 exactly this happened at 07:16, the hold was cleared
+        // at 07:21, and the same false outing reopened ten seconds later
+        // having learned nothing.
+        //
+        // Stored with the evidence as it stood, so the thresholds above can
+        // one day be set from these instead of from a week of her movement
+        // that never contained a known-bad case.
+        if (!on && (outing.phase === 'out' || outing.phase === 'signal-lost')) {
+            const snapshot = tracker.snapshot();
+            db.record('false-positive', {
+                phase: outing.phase,
+                outingSinceMs: outing.since,
+                fromHome: lastSignals?.fromHome ?? null,
+                displacementM: lastSignals?.displacementM ?? null,
+                stillnessM: stillness.value().displacementM,
+                stillnessSettled: stillness.settled(),
+                battery: snapshot.hardware?.battery_level ?? null,
+                chargingState: snapshot.charging_state ?? null,
+                batteryState: snapshot.battery_state ?? null,
+                docked: outing.docked ?? false,
+            });
+            console.log('recorded a false positive: live held off while phase was ' + outing.phase);
+        }
+
         console.log(`manual hold: live ${on ? 'on' : 'off'} for ${minutes} min`);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ hold, phase: outing.phase }));
@@ -278,6 +308,24 @@ if (!replayPath) {
 const controller = new AbortController();
 const tracker = createTracker();
 const window = createWindow();
+
+/**
+ * A much longer view of where she has been, for the one question a minute
+ * cannot answer: has anything moved at all in the last half hour. This is
+ * what retracts an outing that only ever existed because a tracker on its
+ * charger kept emitting fixes (**C41**).
+ */
+const stillness = createDisplacement(configured(OUTING).stillnessWindowS);
+
+/**
+ * The short view, for how quickly the docked latch can open.
+ *
+ * Its own window rather than the one `signals.js` keeps, even though both
+ * default to 60 seconds. That one is the basis of the thrash ratio, so making
+ * it a tuning knob for the latch would move a detector as a side effect of
+ * changing an outing setting.
+ */
+const reaction = createDisplacement(configured(OUTING).reactionWindowS);
 const detector = createDetector(configured(DEFAULTS));
 const incidents = createIncidents();
 incidents.restore(db.loadState('incident'));
@@ -356,14 +404,30 @@ async function tick() {
     const snapshot = tracker.snapshot();
     const live = snapshot.live_tracking ?? {};
 
+    // Both windows are settings, so both can change under a running service.
+    // Applied here rather than at the edit, so there is one place that knows
+    // the windows exist and no path that can forget to.
+    const spans = configured(OUTING);
+    stillness.resize(spans.stillnessWindowS);
+    reaction.resize(spans.reactionWindowS);
+
+    const drift = stillness.value();
+
     const next = step(
         outing,
         {
             nowMs: Date.now(),
             hour: new Date().getHours(),
             charging: snapshot.charging_state === 'CHARGING',
+            // The charger stops charging at 100% and the state flips back to
+            // NOT_CHARGING, so this is the only thing left saying "full and
+            // sitting on the dock" (**C40**).
+            batteryFull: snapshot.battery_state === 'FULL',
             freshFix: sawFreshFix,
             distanceM: lastSignals?.fromHome ?? null,
+            movedM: drift.displacementM,
+            movedRecentlyM: reaction.value().displacementM,
+            stillnessSettled: stillness.settled(),
             holdUntilMs: hold.untilMs,
             holdLive: hold.live,
         },
@@ -417,10 +481,13 @@ async function tick() {
         }
     }
 
-    // Battery, each time it falls past a step. Only while she is out — a
-    // charging tracker dropping a percent is not news.
+    // Battery, each time it falls past a step. Only while she is off the
+    // dock — a tracker sitting on its charger dropping a percent is not news.
+    // `charging_state` alone was not enough to know that: it reads
+    // NOT_CHARGING at a full battery, which is how a docked tracker managed
+    // to drain 100% to 96% inside the reporting path on 2026-09-21 (**C40**).
     const battery = snapshot.hardware?.battery_level ?? null;
-    if (battery !== null && snapshot.charging_state !== 'CHARGING') {
+    if (battery !== null && !next.docked) {
         const crossed = batteryStepCrossed(lastBattery, battery, configured(OUTING).batteryStepPercent);
         if (crossed !== null) void push(forBattery(crossed, petName));
         lastBattery = battery;
@@ -442,6 +509,11 @@ async function tick() {
         findings: [],
         pending: [],
         petName,
+        battery,
+        chargingState: snapshot.charging_state ?? null,
+        batteryState: snapshot.battery_state ?? null,
+        docked: next.docked,
+        stillnessM: drift.displacementM,
     });
 }
 
@@ -536,6 +608,8 @@ try {
         sawFreshFix = true;
         const snapshot = tracker.snapshot();
 
+        stillness.add(fix);
+        reaction.add(fix);
         const signals = computeSignals({
             fix,
             window: window.add(fix),
@@ -565,8 +639,20 @@ try {
             ? tighten(configured(DEFAULTS), settings.dangerFactor)
             : configured(DEFAULTS);
 
-        const raw = detector.assess(signals, thresholds);
-        const verdict = zone.inside
+        // Nothing that happens to a tracker on its charging dock is news, and
+        // this is where that has to be enforced: the detectors run on every
+        // fix that arrives, whatever the outing phase says, so the docked
+        // latch on its own would still have let the charging hour raise its
+        // three alarms. Judging her by a tracker that is not on her is the
+        // root of every false reading that morning (**C41**).
+        //
+        // The fix is still recorded and still broadcast — the evidence is
+        // worth keeping and the dashboard should show what is arriving. Only
+        // the judgement is withheld.
+        const raw = outing.docked
+            ? { level: /** @type {'calm'} */ ('calm'), findings: [], pending: [] }
+            : detector.assess(signals, thresholds);
+        const verdict = zone.inside && !outing.docked
             ? { ...raw, findings: escalate(raw.findings), level: raw.findings.length ? 'alarm' : raw.level }
             : raw;
 
@@ -590,6 +676,7 @@ try {
                     moved: signals.moved,
                     interval: signals.interval,
                     thrash: signals.thrash,
+                    displacementM: signals.displacementM,
                     fromHome: signals.fromHome,
                     zone: currentZone,
                     level: verdict.level,
@@ -624,6 +711,14 @@ try {
             petName,
             battery: snapshot.hardware?.battery_level ?? null,
             trackerState: snapshot.tracker_state ?? null,
+            // Both of these were invisible while a tracker on its charger was
+            // reported as being out for an entire morning. A dashboard that
+            // cannot show why the service thinks she is outside cannot be
+            // used to catch it thinking wrongly (**D5**).
+            chargingState: snapshot.charging_state ?? null,
+            batteryState: snapshot.battery_state ?? null,
+            docked: outing.docked ?? false,
+            stillnessM: stillness.value().displacementM,
         });
     }
 } catch (err) {
@@ -638,6 +733,7 @@ function emptySignals() {
         moved: null,
         interval: null,
         thrash: null,
+        displacementM: null,
         fromHome: null,
         accuracy: null,
         sensor: null,

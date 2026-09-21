@@ -9,10 +9,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDetector, DEFAULTS, findings, worst } from '../../detectors.js';
 
-/** A reading of a calm cat: the measured standing-still profile. */
+/**
+ * A reading of a calm cat: the measured standing-still profile.
+ *
+ * `displacementM` is here because a sprint is only believed from a tracker
+ * that has actually got somewhere. 30m over the last minute is an ordinary
+ * outdoor figure for her — her own dense-window p99 is 17.6m — and it keeps
+ * these cases about the speed thresholds rather than about the gate, which
+ * has its own tests below.
+ */
 const calm = {
     speed: 0.15,
     thrash: null,
+    displacementM: 30,
     staleness: 4,
     fromHome: 20,
     sensor: 'GPS',
@@ -218,4 +227,36 @@ test('assess accepts tightened thresholds for one reading', () => {
 
     assert.equal(detector.assess(reading({ speed: 1.5 })).level, 'calm');
     assert.equal(detector.assess(reading({ speed: 1.5 }), tight).level, 'alarm');
+});
+
+test('a sprint from a tracker that has not moved is a bad fix, not a bolt', () => {
+    // The charging hour produced 11.54 m/s while its centre moved 4.2m.
+    assert.deepEqual(findings(reading({ speed: 11.54, displacementM: 4.2 })), []);
+});
+
+test('a sprint is not believed until the window can say where she got to', () => {
+    // That reading came off a window of three fixes. Too few to know where
+    // she got to is too few to believe how fast she got there.
+    assert.deepEqual(findings(reading({ speed: 11.54, displacementM: null })), []);
+});
+
+test('a real bolt with real ground covered still alarms', () => {
+    const found = findings(reading({ speed: 3.5, displacementM: 40 }));
+    assert.equal(found.length, 1);
+    assert.equal(found[0].code, 'sprint');
+});
+
+test('thrash is never gated on displacement', () => {
+    // A fight is two cats going nowhere hard. Gating this the way sprint is
+    // gated would blind the detector to its own subject.
+    const found = findings(reading({ speed: 1.0, thrash: 8, displacementM: 0.5 }));
+    assert.deepEqual(found.map((f) => f.code), ['thrash']);
+});
+
+test('the gate can be switched off from the dashboard', () => {
+    const found = findings(reading({ speed: 11.54, displacementM: 4.2 }), {
+        ...DEFAULTS,
+        displacementGateEnabled: false,
+    });
+    assert.deepEqual(found.map((f) => f.code), ['sprint']);
 });
