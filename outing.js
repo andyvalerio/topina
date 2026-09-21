@@ -152,11 +152,18 @@ export const DESCRIBED = {
  * and holding until something moves closes that hole: the only way off the
  * dock is to physically leave it.
  *
- * `batteryFull` latches too, but **only from a cold start**. It is there for
- * the case where the service boots onto an already-full docked tracker and so
- * never witnesses the charging transition. Restricting it to `initial()`
- * state means a full battery can never steal an outing already in progress —
- * she often goes out on a full charge, and that must stay an outing.
+ * `batteryFull` latches too, but **only when nothing is known about the dock
+ * yet**. It is there for the case where the service boots onto an already-full
+ * docked tracker and so never witnesses the charging transition. That is true
+ * of a cold start, and equally true on the first tick after an upgrade from a
+ * version that had no latch at all — a stored state with no `docked` key knows
+ * nothing about the dock, and without this the upgrade would land with the
+ * latch open on a tracker sitting at 100% and reporting NOT_CHARGING, which is
+ * precisely the blind spot being closed.
+ *
+ * Both paths are guarded on her not already being out, so a full battery can
+ * never steal an outing in progress — she often goes out on a full charge, and
+ * that must stay an outing.
  *
  * @param {{phase: Phase, docked: boolean, since: number}} state
  * @param {{charging: boolean, batteryFull: boolean, movedM: number|null,
@@ -177,8 +184,14 @@ export function dockedNext(state, input, config = DEFAULTS) {
     if (charging) return true;
     if (state.docked) return !moved;
 
+    // Absent, rather than false: a stored state written before the latch
+    // existed has no opinion about the dock, as opposed to one that has
+    // decided the tracker is off it.
+    const dockUnknown = state.docked === undefined;
     const coldStart = state.phase === 'waiting' && state.since === 0;
-    return coldStart && batteryFull && !moved;
+    const notAlreadyOut = state.phase !== 'out' && state.phase !== 'signal-lost';
+
+    return (coldStart || dockUnknown) && notAlreadyOut && batteryFull && !moved;
 }
 
 /**

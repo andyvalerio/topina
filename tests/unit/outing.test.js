@@ -66,6 +66,31 @@ test('a slow departure opens the latch on the long window', () => {
     assert.equal(s.docked, false);
 });
 
+test('an upgrade onto a docked tracker latches it on the first tick', () => {
+    // The state this actually shipped onto: written by a version with no
+    // latch, so no `docked` key, a non-zero `since`, and a tracker sitting at
+    // 100% reporting NOT_CHARGING. Without this the upgrade lands with the
+    // latch open on exactly the case it exists to close.
+    const stored = { phase: 'waiting', since: 1789971136041, lastFreshFixMs: null, lastDistanceM: 16.5 };
+
+    assert.equal(stored.docked, undefined, 'the state really has no opinion about the dock');
+    assert.equal(
+        dockedNext(stored, { charging: false, batteryFull: true, movedM: null, movedRecentlyM: null }),
+        true
+    );
+});
+
+test('an upgrade mid-outing does not steal the outing', () => {
+    // Same missing key, but she is genuinely out on a full charge. That must
+    // stay an outing.
+    const stored = { phase: 'out', since: 1789971136041, lastFreshFixMs: 1, lastDistanceM: 40 };
+
+    assert.equal(
+        dockedNext(stored, { charging: false, batteryFull: true, movedM: 2, movedRecentlyM: 1 }),
+        false
+    );
+});
+
 test('a full battery latches the dock only from a cold start', () => {
     // Boot onto an already-full docked tracker: the charging transition was
     // never witnessed, so this is the only thing left to notice it.
