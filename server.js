@@ -27,7 +27,7 @@ import { fileSource, liveSource } from './sources.js';
 import { numericOption } from './phases.js';
 import { createNotifier } from './notify.js';
 import { createAlerter } from './alerts.js';
-import { batteryStepCrossed, forBattery, forFindings, forOuting } from './notifications.js';
+import { announce, batteryStepCrossed, forBattery, forFindings, forOuting, noQuiet } from './notifications.js';
 import { dayKey, due as heartbeatDue, message as heartbeatMessage } from './heartbeat.js';
 import { credentials, fcm, missing, petId, petName, trackerId } from './config.js';
 
@@ -387,6 +387,14 @@ let sawFreshFix = false;
 // she is outside, or it quietly stops watching her.
 let outing = db.loadState('outing') ?? initial();
 let hold = db.loadState('hold') ?? { untilMs: 0, live: /** @type {boolean|null} */ (null) };
+
+/**
+ * When the phone may next be told about a coming or going.
+ *
+ * Stored, not just held in memory: a crash loop that reset this would be free
+ * to announce on every restart, which is the failure mode it exists to stop.
+ */
+let quiet = db.loadState('quiet') ?? noQuiet();
 if (outing.phase === 'out' || outing.phase === 'signal-lost') {
     console.log(`restored mid-outing: ${outing.phase}`);
 }
@@ -458,9 +466,24 @@ async function tick() {
         }
     }
 
-    if (next.notify) db.record('notify', { kind: next.notify, distanceM: next.lastDistanceM });
+    if (next.notify) {
+        // Recorded whether or not it is sent. The event happened, the export
+        // and the dashboard should show it, and only the buzz is rationed.
+        const decision = announce(next.notify, quiet, configured(OUTING), Date.now());
+        db.record('notify', {
+            kind: next.notify,
+            distanceM: next.lastDistanceM,
+            sent: decision.send,
+        });
 
-    if (next.notify) void push(forOuting(next.notify, notificationContext()));
+        if (decision.quiet !== quiet) {
+            quiet = decision.quiet;
+            db.saveState('quiet', quiet);
+        }
+
+        if (decision.send) void push(forOuting(next.notify, notificationContext()));
+        else console.log(`notify suppressed: ${next.notify} (rationed)`);
+    }
 
     // One message a day, so the silence of a dead service is noticeable.
     // Everything else about this system is invisible when it fails.
@@ -504,6 +527,7 @@ async function tick() {
         // structurally unable to send a command, which looks identical to
         // working.
         commandsEnabled: useLive,
+        quiet,
         signals: lastSignals ?? emptySignals(),
         level: 'calm',
         findings: [],

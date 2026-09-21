@@ -264,8 +264,12 @@ function render() {
       // never a mystery.
       ? `held ${hold.live ? 'ON' : 'OFF'} — reverts to auto in ${Math.ceil(left / 60000)} min`
       : '';
+    // A phone that has gone quiet on purpose looks exactly like one that has
+    // stopped working, so the page says which.
+    const quietLeft = last.quiet ? Math.max(last.quiet.lifecycle, last.quiet.signal) - Date.now() : 0;
     document.getElementById('foot').textContent =
-      `${frames.length} frames held · last data ${fmt(s.staleness, 0)}s ago`;
+      `${frames.length} frames held · last data ${fmt(s.staleness, 0)}s ago`
+      + (quietLeft > 0 ? ` · quiet about comings and goings for ${Math.ceil(quietLeft / 60000)} min (alarms unaffected)` : '');
   }
 
   for (const spec of Object.values(CHARTS)) draw(spec);

@@ -150,3 +150,69 @@ export function batteryStepCrossed(previous, current, stepPercent) {
     const step = (v) => Math.floor(v / stepPercent) * stepPercent;
     return step(current) < step(previous) ? step(current) : null;
 }
+
+/**
+ * Which quiet period a notification belongs to, if any.
+ *
+ * Two buckets, because they need different patience. Comings and goings are
+ * routine and get an hour. Losing sight of her is not routine — but it flaps
+ * by construction: with `quietS` at 180 seconds, fixes arriving every ~200
+ * seconds from under a car produce `signal-lost`, a fix, `signal-back`, and
+ * round again, about **36 notifications an hour**. The first loss must always
+ * get through; the flapping after it must not.
+ *
+ * Anything not listed here — an alarm, the rival's garden — is never rationed.
+ */
+const BUCKETS = {
+    out: 'lifecycle',
+    home: 'lifecycle',
+    still: 'lifecycle',
+    'signal-lost': 'signal',
+    'signal-back': 'signal',
+};
+
+/** Nothing is pending. */
+export const noQuiet = () => ({ lifecycle: 0, signal: 0 });
+
+/**
+ * Whether a notification should reach the phone.
+ *
+ * Being let out is news. Being outside is not, and she is in and out all day,
+ * so the state machine changing its mind is not an event worth a buzz. On
+ * 2026-09-21 the life-cycle notifications fired **86 times in three hours** —
+ * 43 announcements and 43 retractions, alternating every three minutes — which
+ * is how a monitor teaches someone to ignore it, and then misses the one that
+ * mattered.
+ *
+ * So the first announcement opens a quiet period over its bucket. Any of them
+ * opens it, not just `out`: a retraction firing the moment the period lapsed
+ * would move the noise rather than remove it.
+ *
+ * Pure: the caller owns the quiet state and stores it, the same way the outing
+ * state and the hold are stored, so a restart does not reopen the floodgates.
+ *
+ * @param {string} kind
+ * @param {{lifecycle: number, signal: number}} quiet epoch milliseconds
+ * @param {object} config
+ * @param {number} nowMs
+ * @returns {{send: boolean, quiet: {lifecycle: number, signal: number}}}
+ */
+export function announce(kind, quiet, config, nowMs) {
+    const bucket = BUCKETS[kind];
+    if (!bucket) return { send: true, quiet };
+
+    const enabled = {
+        out: config.notifyOutEnabled,
+        home: config.notifyHomeEnabled,
+        still: config.notifyStillEnabled,
+        'signal-lost': true,
+        'signal-back': true,
+    }[kind];
+
+    // Switched off, or inside the quiet period. Either way the event still
+    // happened and is still recorded — this decides the buzz, nothing else.
+    if (!enabled || nowMs < quiet[bucket]) return { send: false, quiet };
+
+    const forS = bucket === 'signal' ? config.notifySignalQuietS : config.notifyQuietS;
+    return { send: true, quiet: { ...quiet, [bucket]: nowMs + forS * 1000 } };
+}

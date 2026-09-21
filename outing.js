@@ -97,6 +97,27 @@ export const DEFAULTS = {
 
     stillnessRetractEnabled: true,
 
+    /**
+     * How long the phone stays quiet about her comings and goings after one
+     * of them has been announced.
+     *
+     * Measured need: on 2026-09-21 the life-cycle notifications fired 86 times
+     * in three hours. Being let out is news; being outside is not, and she is
+     * in and out all day.
+     */
+    notifyQuietS: 3600,
+
+    /**
+     * The same, for losing and regaining sight of her. Longer, because this
+     * pair flaps hardest: intermittent fixes produce a loss and a return every
+     * few minutes indefinitely. The first loss is never held back.
+     */
+    notifySignalQuietS: 1800,
+
+    notifyOutEnabled: true,
+    notifyHomeEnabled: false,
+    notifyStillEnabled: true,
+
     /** Consecutive fixes inside a danger zone before it counts as being there. */
     dangerDwellFixes: 3,
 
@@ -134,6 +155,11 @@ export const DESCRIBED = {
     stillnessWindowS: 'The span the long window covers, in seconds. It is both the basis of \u201cnot out after all\u201d and the patience before saying so - at 1800 it takes half an hour of going nowhere. Shorter reacts faster and risks writing off a cat having a long sit.',
     reactionWindowS: 'The span the short window covers, in seconds. How quickly the tracker leaving its charger can be noticed. Shorter is faster but noisier, so it pairs with the higher threshold above.',
     stillnessRetractEnabled: 'Whether half an hour of going nowhere near home ends an outing. Turning this off restores the old behaviour, where only silence could end one - which is how a tracker on its charger stayed \u201cout\u201d for an entire morning.',
+    notifyQuietS: 'How long the phone stays quiet about comings and goings after one has been announced. Alarms are never affected. At 3600 you hear about an outing at most once an hour, however many times the state machine changes its mind.',
+    notifySignalQuietS: 'How long the phone stays quiet after \u201ccan\u2019t see her\u201d or \u201cshe is back in view\u201d. The first loss always gets through; this only stops the two flipping back and forth, which they do every few minutes when fixes are intermittent.',
+    notifyOutEnabled: 'Whether \u201cshe is out\u201d reaches the phone at all. Subject to the quiet period above.',
+    notifyHomeEnabled: 'Whether \u201cshe is back\u201d reaches the phone. Off by default: she is in and out all day, so it carries the same noise as announcing every departure.',
+    notifyStillEnabled: 'Whether \u201cnot out after all\u201d reaches the phone. It is a retraction of something already announced, and it is wrong about 43% of the time against her own history, so it is worth being able to silence without switching the retraction itself off.',
     dangerDwellFixes: 'How many consecutive fixes inside a danger zone before it counts. The rival zone starts 30m from the house, so stray fixes cross its edge constantly.',
     dangerFactor: 'How much to tighten alarm thresholds while she is in a danger zone. 0.7 means a sprint alarms at 70% of the usual speed.',
     dangerZoneEnabled: 'Whether danger zones read from Tractive affect anything at all.',
@@ -251,9 +277,19 @@ export function step(state, input, config = DEFAULTS) {
     // stillness is at least as likely to mean something has gone wrong as to
     // mean she is not there, and writing off an outing is the one error this
     // system must not make.
+    // The outing must have *run* for the window before stillness can end it.
+    // Without this the retraction fires seconds after `out` is entered — the
+    // rolling window is already full and already below threshold, so the
+    // outing never gets to exist. On 2026-09-21 that produced a three-hour
+    // loop: out, retracted five seconds later, re-declared three minutes
+    // later, 43 times over. "Half an hour of going nowhere" has to mean half
+    // an hour of *this outing* going nowhere.
+    const outingRunFor = nowMs - state.since;
+
     if (
         state.phase === 'out' &&
         config.stillnessRetractEnabled &&
+        outingRunFor >= config.stillnessWindowS * 1000 &&
         stillnessSettled &&
         movedM !== null &&
         movedM < config.stillM &&

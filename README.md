@@ -410,6 +410,42 @@ Android high priority. If "she is out" landed with the same weight as "sprint
 in the enemy's garden" you would learn to ignore both, and an ignored alert
 costs the same attention as a useful one while buying nothing.
 
+### Being let out is news; being outside is not
+
+Tiers turned out not to be enough. On 2026-09-21 the life-cycle notifications
+fired **86 times in three hours** — 43 announcements and 43 retractions,
+alternating every three minutes, while she was outside the whole time going in
+and out as she pleased. Two faults met: a retraction that fired seconds after
+each `out` because its window is rolling and was already below threshold, and
+nothing at all rationing the buzz.
+
+The retraction now has to wait for the outing to have actually *run* for the
+window. And the comings and goings are rationed: the first announcement opens a
+quiet period, and any of them opens it, since a retraction firing the moment
+the period lapsed would move the noise rather than remove it.
+
+| setting | default | |
+|---|---|---|
+| `notifyQuietS` | 3600 | Quiet about comings and goings for an hour after one is announced |
+| `notifyOutEnabled` | true | "She is out" |
+| `notifyHomeEnabled` | **false** | "She is back" — she is in and out all day, so every return carries the same noise as every departure |
+| `notifyStillEnabled` | true | "Not out after all" — kept, but silenceable without switching the retraction itself off |
+| `notifySignalQuietS` | 1800 | Quiet after "can't see her" / "she's back in view". The first loss always gets through |
+
+Replayed through that afternoon's real sequence, 86 pushes become 4. The test
+that asserts it is [notify-loop.test.js](tests/unit/notify-loop.test.js), against
+the exported events themselves.
+
+Losing sight of her gets its own quiet period rather than sharing one, because
+it flaps hardest: with `quietS` at 180s and fixes arriving every ~200s from
+under a car, `signal-lost` and `signal-back` alternate about **36 times an
+hour**. The first loss is never held back; the flapping after it is.
+
+**Alarms are never rationed.** Sprint, thrash, far-from-home, signal-lost and
+the rival's garden ignore all of the above. Rate-limiting the thing the system
+exists to tell you would be the one unforgivable version of this feature, so
+the quiet period is not even consulted for them.
+
 The coordinates are in the body deliberately. Tapping through shows where she
 is *now*, which for "went quiet four minutes ago" is not what the alert was
 about.

@@ -210,8 +210,19 @@ test('half an hour of going nowhere near home ends the outing', () => {
     // The check whose absence held a phantom outing open for a whole morning:
     // the only previous way out of this phase was silence, and a tracker on
     // its charger is not silent.
-    let s = step(step(initial(), input()), input({ nowMs: T + 9_000, freshFix: true, distanceM: 13 }));
-    s = step(s, input({ nowMs: T + 1_800_000, freshFix: true, distanceM: 13, movedM: 3.5, stillnessSettled: true }));
+    // The clock has to clear the window measured from when the outing began,
+    // not from when the test started: the retraction is about half an hour of
+    // *this outing* going nowhere, which is what stops it firing seconds
+    // after `out` is entered.
+    const began = T + 9_000;
+    let s = step(step(initial(), input()), input({ nowMs: began, freshFix: true, distanceM: 13 }));
+    s = step(s, input({
+        nowMs: began + DEFAULTS.stillnessWindowS * 1000,
+        freshFix: true,
+        distanceM: 13,
+        movedM: 3.5,
+        stillnessSettled: true,
+    }));
 
     assert.equal(s.phase, 'waiting');
     assert.equal(s.notify, 'still');
